@@ -245,11 +245,31 @@ int api_chat(const jb_config *cfg, cJSON *messages, cJSON *tools, api_response *
 
     /* Read SSE lines */
     char line[65536];
+    int first_line = 1;
     while (fgets(line, sizeof(line), fp)) {
         /* Strip trailing newline */
         size_t len = strlen(line);
         while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r'))
             line[--len] = '\0';
+
+        /* Check for non-SSE error response (JSON error from API) */
+        if (first_line && line[0] == '{') {
+            cJSON *err = cJSON_Parse(line);
+            if (err) {
+                cJSON *err_obj = cJSON_GetObjectItemCaseSensitive(err, "error");
+                if (err_obj) {
+                    /* This is a non-streaming API error */
+                    char *err_msg = cJSON_PrintUnformatted(err_obj);
+                    resp->text = err_msg;
+                    cJSON_Delete(err);
+                    pclose(fp);
+                    remove(tmpfile);
+                    return -1;
+                }
+                cJSON_Delete(err);
+            }
+        }
+        first_line = 0;
 
         /* SSE format: data: ... */
         if (strncmp(line, "data: ", 6) == 0) {
