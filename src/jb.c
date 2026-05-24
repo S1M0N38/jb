@@ -39,7 +39,7 @@ static int api_chat_with_retry(const jb_config *cfg, cJSON *messages, cJSON *too
     int base_delay = 2;  /* seconds */
 
     for (int attempt = 0; attempt <= max_retries; attempt++) {
-        int rc = api_chat(cfg, messages, tools, resp);
+        int rc = api_chat(cfg, messages, tools, resp, sess);
 
         if (rc == 0) return 0;
 
@@ -113,7 +113,8 @@ int main(void)
     {
         cJSON *state_msg = cJSON_CreateObject();
         cJSON_AddStringToObject(state_msg, "role", "system");
-        cJSON_AddStringToObject(state_msg, "content", "...");
+        cJSON_AddStringToObject(state_msg, "content",
+            cJSON_GetObjectItemCaseSensitive(sys_msg, "content")->valuestring);
         char *s = cJSON_PrintUnformatted(state_msg);
         session_append_state(&sess, s);
         free(s);

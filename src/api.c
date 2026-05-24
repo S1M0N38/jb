@@ -206,7 +206,7 @@ void api_response_free(api_response *resp)
     /* tool_calls_arr is owned by caller or not allocated */
 }
 
-int api_chat(const jb_config *cfg, cJSON *messages, cJSON *tools, api_response *resp)
+int api_chat(const jb_config *cfg, cJSON *messages, cJSON *tools, api_response *resp, jb_session *sess)
 {
     char *body = build_request_body(cfg, messages, tools);
     if (!body) return -1;
@@ -262,6 +262,11 @@ int api_chat(const jb_config *cfg, cJSON *messages, cJSON *tools, api_response *
             }
 
             process_sse_data(&st, data);
+
+            /* Log SSE event to session log */
+            if (sess) {
+                session_append_log(sess, line);
+            }
         }
     }
 

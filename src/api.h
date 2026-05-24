@@ -4,6 +4,7 @@
 
 #include "config.h"
 #include "cJSON.h"
+#include "session.h"
 
 /* Parsed state from a completed SSE stream */
 typedef struct {
@@ -21,7 +22,8 @@ void api_response_init(api_response *resp);
 
 /* Send messages array to the API and stream the response.
    Returns 0 on success, -1 on error.
-   resp is filled with parsed content. */
-int api_chat(const jb_config *cfg, cJSON *messages, cJSON *tools, api_response *resp);
+   resp is filled with parsed content.
+   If sess is non-NULL, SSE events are logged to session log. */
+int api_chat(const jb_config *cfg, cJSON *messages, cJSON *tools, api_response *resp, jb_session *sess);
 
 #endif

@@ -21,6 +21,20 @@ if [ -n "$_latest" ]; then
         *system*) pass "state.jsonl starts with system message" ;;
         *)        fail "state.jsonl starts with system message" "got: $(echo "$_first" | head -c 100)" ;;
     esac
+
+    # Check that log.jsonl has SSE events
+    _log_lines=$(wc -l < "$_latest/log.jsonl")
+    if [ "$_log_lines" -ge 1 ]; then
+        pass "log.jsonl has SSE events ($_log_lines lines)"
+    else
+        fail "log.jsonl has SSE events" "$_log_lines lines"
+    fi
+
+    _first_log=$(head -1 "$_latest/log.jsonl")
+    case "$_first_log" in
+        *data:*) pass "log.jsonl contains SSE data lines" ;;
+        *)       fail "log.jsonl contains SSE data lines" ;;
+    esac
 else
     fail "state.jsonl checks" "no session dir found"
 fi
