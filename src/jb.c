@@ -10,6 +10,7 @@
 #include "api.h"
 #include "tools.h"
 #include "prompt.h"
+#include "version.h"
 
 /* ---- Globals for signal handling ---- */
 static jb_session g_session;
@@ -83,8 +84,26 @@ static int api_chat_with_retry(const jb_config *cfg, cJSON *messages, cJSON *too
     return -1;
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    /* Flag parsing — only --version and --help are recognized */
+    if (argc > 1) {
+        if (strcmp(argv[1], "--version") == 0) {
+            printf("jb %s\n", JB_VERSION);
+            return 0;
+        }
+        if (strcmp(argv[1], "--help") == 0) {
+            printf("jb — a minimal agentic coding loop. See jb(1).\n");
+            return 0;
+        }
+    }
+
+    /* No flags, stdin is a tty — usage hint */
+    if (argc == 1 && isatty(STDIN_FILENO)) {
+        fprintf(stderr, "jb: usage: prompt | jb  (see jb(1))\n");
+        return 3;
+    }
+
     jb_config cfg;
 
     /* Load config — exits with code 3 on failure */
