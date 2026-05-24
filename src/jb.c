@@ -155,6 +155,7 @@ int main(void)
     /* Get tool definitions */
     cJSON *tools = tools_get_definitions();
     tools_set_limits(cfg.max_output_lines, cfg.max_output_bytes);
+    tools_set_session(sess->uuid);
 
     /* Agentic loop */
     long total_tokens = 0;

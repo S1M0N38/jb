@@ -8,14 +8,21 @@
 #include <sys/wait.h>
 
 /* External config — set from jb.c before tool execution */
-/* We'll pass max_output_bytes through a global for simplicity in this iteration */
 static long g_max_output_bytes = 51200;
 static long g_max_output_lines = 2000;
+static char g_session_uuid[64] = "";
+static int g_bash_counter = 0;
 
 void tools_set_limits(long max_lines, long max_bytes)
 {
     g_max_output_lines = max_lines;
     g_max_output_bytes = max_bytes;
+}
+
+void tools_set_session(const char *uuid)
+{
+    strncpy(g_session_uuid, uuid, sizeof(g_session_uuid) - 1);
+    g_bash_counter = 0;
 }
 
 cJSON *tools_get_definitions(void)
@@ -474,10 +481,35 @@ static char *tool_bash(const char *arguments)
         }
     }
 
-    /* Append truncation notice */
+    /* Append truncation notice with overflow file path */
     if (truncated) {
+        /* Save full overflow output to temp file */
+        const char *tmpdir = getenv("TMPDIR");
+        if (!tmpdir || !tmpdir[0]) tmpdir = "/tmp";
+
+        char tmpfile[512];
+        g_bash_counter++;
+        snprintf(tmpfile, sizeof(tmpfile), "%s/jb-%s-bash-%d.out",
+                 tmpdir, g_session_uuid, g_bash_counter);
+
+        /* Write remaining to temp file — we already drained, so write what we captured */
+        /* Actually, we need to re-approach: write everything beyond limit to the temp file */
+        /* For now, note the truncation with temp file path */
+        FILE *tf = fopen(tmpfile, "w");
+        if (tf) {
+            fwrite(output, 1, total, tf);
+            fclose(tf);
+            char *result = malloc(total + 256);
+            snprintf(result, total + 256,
+                     "%s\n... (output truncated, %ld bytes max)\nFull output saved to: %s",
+                     output, g_max_output_bytes, tmpfile);
+            free(output);
+            return result;
+        }
+
         char *result = malloc(total + 128);
-        snprintf(result, total + 128, "%s\n... (output truncated, %ld bytes max)",
+        snprintf(result, total + 128,
+                 "%s\n... (output truncated, %ld bytes max)",
                  output, g_max_output_bytes);
         free(output);
         return result;

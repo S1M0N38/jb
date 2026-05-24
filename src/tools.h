@@ -14,4 +14,7 @@ char *tool_execute(const char *name, const char *arguments);
 /* Set output limits (from config) */
 void tools_set_limits(long max_lines, long max_bytes);
 
+/* Set session UUID for temp file naming */
+void tools_set_session(const char *uuid);
+
 #endif
