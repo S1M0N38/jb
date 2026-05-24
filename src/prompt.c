@@ -240,7 +240,8 @@ char *prompt_build(void)
         "- write: Create or overwrite files (creates parent dirs)\n"
         "- edit: Make precise text replacements in files\n"
         "- bash: Execute shell commands (with optional timeout)\n\n"
-        "Be concise. Execute. You can spawn a sub-agent by running `jb` as a bash command.\n\n");
+        "Be concise. Execute. You can spawn a sub-agent by running `jb` as a bash command.\n"
+        "To read your own documentation, run `man jb | col -b`.\n\n");
 
     /* Current date */
     char date_buf[64];
