@@ -1,9 +1,22 @@
 /* tools.c — tool definitions and implementations */
 #include "tools.h"
+#include "config.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/wait.h>
+
+/* External config — set from jb.c before tool execution */
+/* We'll pass max_output_bytes through a global for simplicity in this iteration */
+static long g_max_output_bytes = 51200;
+static long g_max_output_lines = 2000;
+
+void tools_set_limits(long max_lines, long max_bytes)
+{
+    g_max_output_lines = max_lines;
+    g_max_output_bytes = max_bytes;
+}
 
 cJSON *tools_get_definitions(void)
 {
@@ -155,28 +168,6 @@ cJSON *tools_get_definitions(void)
 
 /* ---- Tool implementations ---- */
 
-static char *read_file_contents(const char *path)
-{
-    FILE *f = fopen(path, "rb");
-    if (!f) {
-        char *err = malloc(256);
-        snprintf(err, 256, "Error: cannot open file '%s'", path);
-        return err;
-    }
-
-    fseek(f, 0, SEEK_END);
-    long len = ftell(f);
-    fseek(f, 0, SEEK_SET);
-
-    char *buf = malloc((size_t)len + 1);
-    if (!buf) { fclose(f); return strdup("Error: out of memory"); }
-
-    size_t nread = fread(buf, 1, (size_t)len, f);
-    buf[nread] = '\0';
-    fclose(f);
-    return buf;
-}
-
 static char *tool_read(const char *arguments)
 {
     cJSON *args = cJSON_Parse(arguments);
@@ -189,12 +180,87 @@ static char *tool_read(const char *arguments)
     }
 
     const char *path = path_j->valuestring;
-    char *content = read_file_contents(path);
+    int offset = 0;  /* 1-indexed, 0 means from start */
+    int limit = 0;   /* 0 means no limit (up to max) */
 
-    /* TODO: implement offset/limit, line numbers, truncation */
+    cJSON *off_j = cJSON_GetObjectItemCaseSensitive(args, "offset");
+    if (off_j && cJSON_IsNumber(off_j)) offset = off_j->valueint;
+
+    cJSON *lim_j = cJSON_GetObjectItemCaseSensitive(args, "limit");
+    if (lim_j && cJSON_IsNumber(lim_j)) limit = lim_j->valueint;
+
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        char *err = malloc(256);
+        snprintf(err, 256, "Error: cannot open file '%s'", path);
+        cJSON_Delete(args);
+        return err;
+    }
+
+    /* Read file with line numbers, like cat -n */
+    size_t cap = g_max_output_bytes + 1;
+    char *result = malloc(cap);
+    size_t result_len = 0;
+    result[0] = '\0';
+
+    char line[65536];
+    int line_no = 0;
+    int lines_output = 0;
+
+    while (fgets(line, sizeof(line), f)) {
+        line_no++;
+
+        /* Skip lines before offset */
+        if (offset > 0 && line_no < offset) continue;
+
+        /* Check line limit */
+        if (limit > 0 && lines_output >= limit) break;
+
+        /* Check max output lines */
+        if (lines_output >= g_max_output_lines) break;
+
+        /* Format: "  123 | <content>" */
+        char numbered[66000];
+        int n = snprintf(numbered, sizeof(numbered), "%6d\t%s", line_no, line);
+
+        /* Ensure newline at end */
+        if (n > 0 && numbered[n-1] != '\n') {
+            numbered[n] = '\n';
+            numbered[n+1] = '\0';
+            n++;
+        }
+
+        /* Check byte limit */
+        if (result_len + (size_t)n >= cap - 1) {
+            /* Truncate */
+            size_t remaining = cap - result_len - 1;
+            if (remaining > 0) {
+                memcpy(result + result_len, numbered, remaining);
+                result_len += remaining;
+            }
+            break;
+        }
+
+        memcpy(result + result_len, numbered, (size_t)n);
+        result_len += (size_t)n;
+        lines_output++;
+    }
+    result[result_len] = '\0';
+    fclose(f);
+
+    /* Add truncation notice if needed */
+    if (!feof(f) || result_len >= (size_t)(g_max_output_bytes - 100)) {
+        const char *notice = "\n... (truncated)";
+        size_t notice_len = strlen(notice);
+        if (result_len + notice_len < cap) {
+            memcpy(result + result_len, notice, notice_len);
+            result_len += notice_len;
+            result[result_len] = '\0';
+        }
+    }
 
     cJSON_Delete(args);
-    return content;
+    return result;
 }
 
 static char *tool_write(const char *arguments)
@@ -214,11 +280,10 @@ static char *tool_write(const char *arguments)
         return strdup("Error: 'content' is required");
     }
 
-    /* Create parent directories with mkdir -p */
-    char cmd[4096];
     const char *path = path_j->valuestring;
+    const char *content = content_j->valuestring;
 
-    /* Extract directory part */
+    /* Create parent directories with mkdir -p */
     char dir[4096];
     strncpy(dir, path, sizeof(dir) - 1);
     dir[sizeof(dir) - 1] = '\0';
@@ -226,37 +291,23 @@ static char *tool_write(const char *arguments)
     if (last_slash) {
         *last_slash = '\0';
         if (dir[0]) {
+            char cmd[4096];
             snprintf(cmd, sizeof(cmd), "mkdir -p '%s' 2>/dev/null", dir);
             system(cmd);
         }
     }
 
-    /* Write content — use a temp file approach to avoid shell escaping */
-    char tmpfile[256];
-    snprintf(tmpfile, sizeof(tmpfile), "/tmp/jb-write-%ld.tmp", (long)getpid());
-
-    FILE *tf = fopen(tmpfile, "w");
-    if (!tf) {
+    FILE *f = fopen(path, "w");
+    if (!f) {
         cJSON_Delete(args);
-        return strdup("Error: cannot create temp file");
+        return strdup("Error: cannot create file");
     }
 
-    /* Write the content directly */
-    const char *content = content_j->valuestring;
-    fwrite(content, 1, strlen(content), tf);
-    fclose(tf);
-
-    snprintf(cmd, sizeof(cmd), "cp '%s' '%s'", tmpfile, path);
-    int ret = system(cmd);
-    remove(tmpfile);
+    fwrite(content, 1, strlen(content), f);
+    fclose(f);
 
     cJSON_Delete(args);
-
-    if (ret == 0) {
-        return strdup("File written successfully.");
-    } else {
-        return strdup("Error: failed to write file");
-    }
+    return strdup("File written successfully.");
 }
 
 static char *tool_edit(const char *arguments)
@@ -277,13 +328,23 @@ static char *tool_edit(const char *arguments)
     }
 
     const char *path = path_j->valuestring;
-    char *content = read_file_contents(path);
-    if (!content) {
+
+    /* Read file */
+    FILE *f = fopen(path, "rb");
+    if (!f) {
         cJSON_Delete(args);
         char *err = malloc(256);
         snprintf(err, 256, "Error: cannot read file '%s'", path);
         return err;
     }
+
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *content = malloc((size_t)len + 1);
+    size_t nread = fread(content, 1, (size_t)len, f);
+    content[nread] = '\0';
+    fclose(f);
 
     /* Apply each edit */
     int n = cJSON_GetArraySize(edits_j);
@@ -301,7 +362,6 @@ static char *tool_edit(const char *arguments)
         const char *old_text = old_j->valuestring;
         const char *new_text = new_j->valuestring;
 
-        /* Find and replace the first occurrence */
         char *pos = strstr(content, old_text);
         if (!pos) {
             free(content);
@@ -312,7 +372,6 @@ static char *tool_edit(const char *arguments)
             return err;
         }
 
-        /* Build new content */
         size_t old_len = strlen(old_text);
         size_t new_len = strlen(new_text);
         size_t content_len = strlen(content);
@@ -330,8 +389,8 @@ static char *tool_edit(const char *arguments)
         content = new_content;
     }
 
-    /* Write modified content back */
-    FILE *f = fopen(path, "w");
+    /* Write back */
+    f = fopen(path, "w");
     if (!f) {
         free(content);
         cJSON_Delete(args);
@@ -356,12 +415,19 @@ static char *tool_bash(const char *arguments)
         return strdup("Error: 'command' is required");
     }
 
-    /* TODO: implement timeout, truncation, temp file overflow */
     const char *cmd = cmd_j->valuestring;
+    int timeout = 0;
 
-    /* Merge stdout+stderr with 2>&1 */
+    cJSON *timeout_j = cJSON_GetObjectItemCaseSensitive(args, "timeout");
+    if (timeout_j && cJSON_IsNumber(timeout_j)) timeout = timeout_j->valueint;
+
+    /* Build full command with stderr merged */
     char full_cmd[8192];
-    snprintf(full_cmd, sizeof(full_cmd), "%s 2>&1", cmd);
+    if (timeout > 0) {
+        snprintf(full_cmd, sizeof(full_cmd), "timeout %d %s 2>&1", timeout, cmd);
+    } else {
+        snprintf(full_cmd, sizeof(full_cmd), "%s 2>&1", cmd);
+    }
 
     FILE *fp = popen(full_cmd, "r");
     if (!fp) {
@@ -369,16 +435,25 @@ static char *tool_bash(const char *arguments)
         return strdup("Error: cannot execute command");
     }
 
-    /* Read output */
-    size_t cap = 65536;
+    /* Read output with truncation */
+    size_t cap = g_max_output_bytes + 1;
     char *output = malloc(cap);
     size_t total = 0;
     char buf[4096];
     size_t nread;
+    int truncated = 0;
+
     while ((nread = fread(buf, 1, sizeof(buf), fp)) > 0) {
-        if (total + nread + 1 > cap) {
-            cap *= 2;
-            output = realloc(output, cap);
+        if (total + nread >= cap - 1) {
+            size_t remaining = cap - total - 1;
+            if (remaining > 0) {
+                memcpy(output + total, buf, remaining);
+                total += remaining;
+            }
+            truncated = 1;
+            /* Drain the rest */
+            while (fread(buf, 1, sizeof(buf), fp) > 0) {}
+            break;
         }
         memcpy(output + total, buf, nread);
         total += nread;
@@ -388,19 +463,27 @@ static char *tool_bash(const char *arguments)
     int status = pclose(fp);
     cJSON_Delete(args);
 
-    /* TODO: truncate if too large, save overflow to temp file */
-
-    /* Append exit code info */
-    char *result = malloc(total + 128);
-    int exit_code = WEXITSTATUS(status);
-    if (exit_code != 0) {
-        snprintf(result, total + 128, "%s\n[exit code: %d]", output, exit_code);
-    } else {
-        memcpy(result, output, total + 1);
+    /* Append exit code if non-zero */
+    if (WIFEXITED(status)) {
+        int exit_code = WEXITSTATUS(status);
+        if (exit_code != 0) {
+            char *result = malloc(total + 128);
+            snprintf(result, total + 128, "%s\n[exit code: %d]", output, exit_code);
+            free(output);
+            return result;
+        }
     }
-    free(output);
 
-    return result;
+    /* Append truncation notice */
+    if (truncated) {
+        char *result = malloc(total + 128);
+        snprintf(result, total + 128, "%s\n... (output truncated, %ld bytes max)",
+                 output, g_max_output_bytes);
+        free(output);
+        return result;
+    }
+
+    return output;
 }
 
 char *tool_execute(const char *name, const char *arguments)

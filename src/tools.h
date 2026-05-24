@@ -11,4 +11,7 @@ cJSON *tools_get_definitions(void);
    Caller must free the returned string. */
 char *tool_execute(const char *name, const char *arguments);
 
+/* Set output limits (from config) */
+void tools_set_limits(long max_lines, long max_bytes);
+
 #endif

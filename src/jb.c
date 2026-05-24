@@ -2,6 +2,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
+#include <unistd.h>
 #include "cJSON.h"
 #include "config.h"
 #include "session.h"
@@ -27,6 +29,41 @@ static char *read_stdin(void)
     }
     buf[len] = '\0';
     return buf;
+}
+
+/* Retry wrapper for api_chat — retries on transient errors */
+static int api_chat_with_retry(const jb_config *cfg, cJSON *messages, cJSON *tools,
+                               api_response *resp, jb_session *sess)
+{
+    int max_retries = 3;
+    int base_delay = 2;  /* seconds */
+
+    for (int attempt = 0; attempt <= max_retries; attempt++) {
+        int rc = api_chat(cfg, messages, tools, resp);
+
+        if (rc == 0) return 0;
+
+        /* Log the error */
+        if (resp->text) {
+            /* Check for non-retryable errors (auth, bad request) */
+            if (strstr(resp->text, "401") || strstr(resp->text, "Unauthorized") ||
+                strstr(resp->text, "400") || strstr(resp->text, "invalid_api_key")) {
+                return -1;
+            }
+        }
+
+        if (attempt < max_retries) {
+            int delay = base_delay << attempt;  /* exponential backoff */
+            char msg[128];
+            snprintf(msg, sizeof(msg), "{\"event\":\"retry\",\"attempt\":%d,\"delay\":%d}", attempt + 1, delay);
+            session_append_log(sess, msg);
+
+            /* Sleep */
+            sleep((unsigned)delay);
+        }
+    }
+
+    return -1;
 }
 
 int main(void)
@@ -96,6 +133,7 @@ int main(void)
 
     /* Get tool definitions */
     cJSON *tools = tools_get_definitions();
+    tools_set_limits(cfg.max_output_lines, cfg.max_output_bytes);
 
     /* Agentic loop */
     long total_tokens = 0;
@@ -103,13 +141,18 @@ int main(void)
     int turn = 0;
 
     while (turn++ < max_turns) {
+        /* Check token budget */
+        if (cfg.max_tokens > 0 && total_tokens >= cfg.max_tokens) {
+            break;
+        }
+
         api_response resp;
         api_response_init(&resp);
 
-        int rc = api_chat(&cfg, messages, tools, &resp);
+        int rc = api_chat_with_retry(&cfg, messages, tools, &resp, &sess);
 
         if (rc != 0) {
-            /* API error */
+            /* API error after retries */
             cJSON_Delete(messages);
             cJSON_Delete(tools);
             session_close(&sess);
@@ -121,11 +164,9 @@ int main(void)
 
         if (resp.finish_tool_calls && resp.tool_calls_arr) {
             /* Model wants to call tools */
-            /* Build assistant message with tool_calls */
             cJSON *assistant_msg = cJSON_CreateObject();
             cJSON_AddStringToObject(assistant_msg, "role", "assistant");
 
-            /* Content may be null */
             if (resp.text && resp.text[0]) {
                 cJSON_AddStringToObject(assistant_msg, "content", resp.text);
             } else {
@@ -174,7 +215,6 @@ int main(void)
                 cJSON_AddStringToObject(tool_msg, "content", result);
                 cJSON_AddItemToArray(messages, tool_msg);
 
-                /* Append to state */
                 {
                     char *s = cJSON_PrintUnformatted(tool_msg);
                     session_append_state(&sess, s);
@@ -196,12 +236,6 @@ int main(void)
         }
         free(resp.text);
         break;
-    }
-
-    /* Append final assistant message to state */
-    {
-        /* We already printed it — store the last text if we tracked it */
-        /* For now, just note completion */
     }
 
     cJSON_Delete(messages);
