@@ -1,0 +1,6 @@
+# Build artifacts
+*.o
+jb
+
+# OS files
+.DS_Store
