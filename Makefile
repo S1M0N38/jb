@@ -17,7 +17,9 @@ OBJS    = $(SRCS:.c=.o)
 
 TARGET  = jb
 
-.PHONY: all clean test
+PREFIX ?= /usr/local
+
+.PHONY: all clean test install
 
 all: $(TARGET)
 
@@ -29,6 +31,12 @@ $(TARGET): $(OBJS)
 
 clean:
 	rm -f $(OBJS) $(TARGET)
+
+install: $(TARGET)
+	mkdir -p $(PREFIX)/bin
+	mkdir -p $(PREFIX)/share/man/man1
+	cp $(TARGET) $(PREFIX)/bin/$(TARGET)
+	cp jb.1 $(PREFIX)/share/man/man1/jb.1
 
 test: $(TARGET)
 	@chmod +x tests/run.sh && sh tests/run.sh
