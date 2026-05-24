@@ -11,6 +11,24 @@
 #include "tools.h"
 #include "prompt.h"
 
+/* ---- Globals for signal handling ---- */
+static jb_session g_session;
+static int g_session_active = 0;
+static char *g_partial_answer = NULL;
+
+static void handle_signal(int sig)
+{
+    if (g_session_active) {
+        session_close(&g_session);
+        g_session_active = 0;
+    }
+    if (g_partial_answer && g_partial_answer[0]) {
+        printf("%s", g_partial_answer);
+        fflush(stdout);
+    }
+    _exit(sig == SIGINT ? 130 : 143);
+}
+
 /* Read all of stdin into a malloc'd string */
 static char *read_stdin(void)
 {
@@ -58,7 +76,6 @@ static int api_chat_with_retry(const jb_config *cfg, cJSON *messages, cJSON *too
             snprintf(msg, sizeof(msg), "{\"event\":\"retry\",\"attempt\":%d,\"delay\":%d}", attempt + 1, delay);
             session_append_log(sess, msg);
 
-            /* Sleep */
             sleep((unsigned)delay);
         }
     }
@@ -69,7 +86,6 @@ static int api_chat_with_retry(const jb_config *cfg, cJSON *messages, cJSON *too
 int main(void)
 {
     jb_config cfg;
-    jb_session sess;
 
     /* Load config — exits with code 3 on failure */
     if (config_load(&cfg) != 0) {
@@ -77,15 +93,22 @@ int main(void)
     }
 
     /* Initialize session */
-    if (session_init(&sess) != 0) {
+    if (session_init(&g_session) != 0) {
         return 3;
     }
+    g_session_active = 1;
+
+    /* Install signal handlers */
+    signal(SIGINT, handle_signal);
+    signal(SIGTERM, handle_signal);
+
+    jb_session *sess = &g_session;
 
     /* Read prompt from stdin */
     char *user_prompt = read_stdin();
     if (!user_prompt || !user_prompt[0]) {
         fprintf(stderr, "jb: no prompt on stdin\n");
-        session_close(&sess);
+        session_close(sess);
         free(user_prompt);
         return 3;
     }
@@ -101,6 +124,17 @@ int main(void)
     cJSON_AddStringToObject(sys_msg, "role", "system");
     cJSON_AddStringToObject(sys_msg, "content", sys_prompt);
     cJSON_AddItemToArray(messages, sys_msg);
+
+    /* Append system message to state */
+    {
+        cJSON *state_msg = cJSON_CreateObject();
+        cJSON_AddStringToObject(state_msg, "role", "system");
+        cJSON_AddStringToObject(state_msg, "content", sys_prompt);
+        char *s = cJSON_PrintUnformatted(state_msg);
+        session_append_state(sess, s);
+        free(s);
+        cJSON_Delete(state_msg);
+    }
     free(sys_prompt);
 
     /* User message */
@@ -109,25 +143,11 @@ int main(void)
     cJSON_AddStringToObject(user_msg, "content", user_prompt);
     cJSON_AddItemToArray(messages, user_msg);
 
-    /* Append initial messages to state */
+    /* Append user message to state */
     {
-        cJSON *state_msg = cJSON_CreateObject();
-        cJSON_AddStringToObject(state_msg, "role", "system");
-        cJSON_AddStringToObject(state_msg, "content",
-            cJSON_GetObjectItemCaseSensitive(sys_msg, "content")->valuestring);
-        char *s = cJSON_PrintUnformatted(state_msg);
-        session_append_state(&sess, s);
+        char *s = cJSON_PrintUnformatted(user_msg);
+        session_append_state(sess, s);
         free(s);
-        cJSON_Delete(state_msg);
-    }
-    {
-        cJSON *state_msg = cJSON_CreateObject();
-        cJSON_AddStringToObject(state_msg, "role", "user");
-        cJSON_AddStringToObject(state_msg, "content", user_prompt);
-        char *s = cJSON_PrintUnformatted(state_msg);
-        session_append_state(&sess, s);
-        free(s);
-        cJSON_Delete(state_msg);
     }
 
     free(user_prompt);
@@ -140,24 +160,24 @@ int main(void)
     long total_tokens = 0;
     int max_turns = 50;  /* safety limit */
     int turn = 0;
+    int exit_code = 0;
 
     while (turn++ < max_turns) {
         /* Check token budget */
         if (cfg.max_tokens > 0 && total_tokens >= cfg.max_tokens) {
+            exit_code = 2;  /* budget exhausted */
             break;
         }
 
         api_response resp;
         api_response_init(&resp);
 
-        int rc = api_chat_with_retry(&cfg, messages, tools, &resp, &sess);
+        int rc = api_chat_with_retry(&cfg, messages, tools, &resp, sess);
 
         if (rc != 0) {
             /* API error after retries */
-            cJSON_Delete(messages);
-            cJSON_Delete(tools);
-            session_close(&sess);
-            return 1;
+            exit_code = 1;
+            break;
         }
 
         /* Accumulate tokens */
@@ -170,6 +190,9 @@ int main(void)
 
             if (resp.text && resp.text[0]) {
                 cJSON_AddStringToObject(assistant_msg, "content", resp.text);
+                /* Track partial answer for signal handler */
+                free(g_partial_answer);
+                g_partial_answer = strdup(resp.text);
             } else {
                 cJSON_AddNullToObject(assistant_msg, "content");
             }
@@ -197,7 +220,7 @@ int main(void)
             /* Append to state */
             {
                 char *s = cJSON_PrintUnformatted(assistant_msg);
-                session_append_state(&sess, s);
+                session_append_state(sess, s);
                 free(s);
             }
 
@@ -218,7 +241,7 @@ int main(void)
 
                 {
                     char *s = cJSON_PrintUnformatted(tool_msg);
-                    session_append_state(&sess, s);
+                    session_append_state(sess, s);
                     free(s);
                 }
 
@@ -234,13 +257,25 @@ int main(void)
         if (resp.text) {
             printf("%s", resp.text);
             fflush(stdout);
+            free(g_partial_answer);
+            g_partial_answer = strdup(resp.text);
         }
         free(resp.text);
         break;
     }
 
+    /* Log token usage */
+    {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "{\"event\":\"done\",\"tokens\":%ld,\"turns\":%d}", total_tokens, turn);
+        session_append_log(sess, msg);
+    }
+
     cJSON_Delete(messages);
     cJSON_Delete(tools);
-    session_close(&sess);
-    return 0;
+    session_close(sess);
+    g_session_active = 0;
+    free(g_partial_answer);
+
+    return exit_code;
 }
