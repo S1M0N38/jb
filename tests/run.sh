@@ -16,7 +16,7 @@ assert_exit() {
     # assert_exit EXPECTED_EXITCODE DESCRIPTION COMMAND [ARGS...]
     _expected="$1"; shift
     _desc="$1"; shift
-    "$@" >/dev/null 2>&/null; _actual=$?
+    "$@" >/dev/null 2>&1; _actual=$?
     if [ "$_actual" -eq "$_expected" ]; then
         pass "$_desc"
     else
