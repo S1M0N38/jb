@@ -1,0 +1,248 @@
+.\" jb.1 — manual page for jb
+.\"
+.TH JB 1 "May 24, 2025" "jb 0.1" "General Commands Manual"
+.
+.SH NAME
+jb \- a minimal agentic coding loop
+.
+.SH SYNOPSIS
+.B echo
+.I prompt
+|
+.BR jb
+.br
+.B jb
+.B \-\-version
+.br
+.B jb
+.B \-\-help
+.
+.SH DESCRIPTION
+The
+.B jb
+utility reads a prompt from standard input, sends it to a language model
+API, executes any tool calls the model requests in a loop, and prints the
+final answer to standard output.
+.PP
+.B jb
+is a filter: stdin is the prompt, stdout is the answer.  There are no
+command-line arguments beyond
+.B \-\-version
+and
+.BR \-\-help .
+Behavior is determined entirely by the configuration file, the working
+directory, and the filesystem.
+.
+.SS The Agentic Loop
+Each
+.I turn
+consists of sending the full conversation to the API, receiving a
+streaming response, and acting on it:
+.IP \(bu 3
+If the model requests tool calls,
+.B jb
+executes them and feeds the results back, then starts another turn.
+.IP \(bu 3
+If the model emits a final text message
+.RI ( finish_reason "stop"),
+.B jb
+prints it to stdout and exits.
+.IP \(bu 3
+If a configurable token budget is exhausted, the partial answer is
+printed and the process exits with code 2.
+.
+.SS Tools
+The model has access to four tools:
+.TP
+.BR read " \fIpath\fR [offset=\fIN\fR] [limit=\fIN\fR]"
+Read file contents with line numbers.  Supports offset and limit for
+large files.
+.TP
+.BR write " \fIpath\fR \fIcontent\fR"
+Create or overwrite a file.  Creates parent directories as needed.
+.TP
+.BR edit " \fIpath\fR edits=[{oldText,newText},...]"
+Make precise text replacements in a file.  Each edit must match a unique,
+non-overlapping region.  Multiple disjoint edits can be applied in a
+single call.
+.TP
+.BR bash " \fIcommand\fR [timeout=\fIN\fR]"
+Execute a shell command.  The model decides the timeout per command.
+If omitted, the command runs to completion.
+.PP
+A sub-agent is a child
+.B jb
+process spawned via the
+.B bash
+tool.  It has its own session, its own API calls, and returns its
+answer via stdout.
+.
+.SS Session Model
+Each run creates a session directory under
+.BR $XDG_CACHE_HOME/jb/sessions/<uuid>/ ,
+containing:
+.TP
+.B state.jsonl
+Append-only JSONL.  One message per line.  The full conversation.
+.TP
+.B log.jsonl
+Real-time log of raw SSE events.  Use
+.B tail -f
+to watch the agent work.
+.PP
+The full message array is sent to the API every turn.  The API is
+stateless.
+.
+.SS Skills
+A
+.I skill
+is a directory containing a
+.B SKILL.md
+file with YAML frontmatter
+.RI ( name ","
+description ) and a markdown body.
+Skills are discovered from:
+.IP \(bu 3
+.B $XDG_CONFIG_HOME/jb/agents/skills/*/SKILL.md
+\(em global skills
+.IP \(bu 3
+.B .agents/skills/*/SKILL.md
+\(em project-local skills
+.PP
+An index of available skills is injected into the system prompt.
+The model reads the full
+.B SKILL.md
+on demand via the
+.B read
+tool.
+.
+.SS Project Context
+.B AGENTS.md
+files are discovered by walking from the current working directory
+upward to the root.  Their contents are concatenated (root first) and
+appended to the system prompt unconditionally.
+.
+.SH CONFIGURATION
+.B jb
+reads its configuration from
+.BR $XDG_CONFIG_HOME/jb/config.json .
+.PP
+.RS
+.nf
+{
+    "api_url": "https://api.openai.com/v1",
+    "model": "gpt-4.1",
+    "max_tokens": 500000,
+    "max_output_lines": 2000,
+    "max_output_bytes": 51200
+}
+.fi
+.RE
+.PP
+All fields are optional.  Defaults are shown above.
+.
+.SH ENVIRONMENT
+.TP
+.B JB_API_KEY
+API key for the language model endpoint.
+.TP
+.B OPENAI_API_KEY
+Fallback API key if
+.B JB_API_KEY
+is not set.
+.TP
+.B XDG_CONFIG_HOME
+Configuration directory.  Defaults to
+.BR $HOME/.config .
+.TP
+.B XDG_CACHE_HOME
+Cache directory for session data.  Defaults to
+.BR $HOME/.cache .
+.TP
+.B TMPDIR
+Directory for temporary files (bash output exceeding limits).
+Defaults to
+.BR /tmp .
+.
+.SH FILES
+.TP
+.B $XDG_CONFIG_HOME/jb/config.json
+Configuration file.
+.TP
+.B $XDG_CACHE_HOME/jb/sessions/<uuid>/state.jsonl
+Session state \(em the full conversation as JSONL.
+.TP
+.B $XDG_CACHE_HOME/jb/sessions/<uuid>/log.jsonl
+Session log \(em raw SSE events for observability.
+.TP
+.B AGENTS.md
+Project context file.  Walked from cwd upward.
+.TP
+.B .agents/skills/*/SKILL.md
+Project-local skill definitions.
+.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.  Final answer printed to stdout.
+.TP
+.B 1
+API or model error after retries.
+.TP
+.B 2
+Token budget exhausted or tool execution error.
+.TP
+.B 3
+Configuration error (missing API key, malformed config, no prompt on stdin).
+.TP
+.B 130
+Process killed by SIGINT.
+.TP
+.B 143
+Process killed by SIGTERM.
+.
+.SH SIGNALS
+.TP
+.B SIGINT
+Kill child processes, write final state to log, print partial answer
+to stdout, exit 130.
+.TP
+.B SIGTERM
+Same as SIGINT, exit 143.
+.TP
+.B SIGPIPE
+Default disposition (die).
+.
+.SH EXAMPLES
+Read a file and ask about it:
+.RS
+.B cat main.c | jb
+.RE
+.PP
+Inline prompt:
+.RS
+.B jb <<< "list files in the current directory"
+.RE
+.PP
+Pipe a specification:
+.RS
+.B cat spec.md | jb
+.RE
+.PP
+Print version:
+.RS
+.B jb --version
+.RE
+.PP
+Read this manual page from within a jb session:
+.RS
+.B man jb | col -b
+.RE
+.
+.SH BUGS
+.B jb
+has no known bugs.  See session log for details.
+.
+.SH SEE ALSO
+.BR curl (1),
+.BR col (1)

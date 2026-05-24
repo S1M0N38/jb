@@ -1,0 +1,22 @@
+jb — a minimal agentic coding loop
+==================================
+
+jb reads a prompt from standard input, sends it to a language model
+API, executes tool calls in a loop, and prints the final answer to
+standard output.  Single C binary, zero runtime dependencies except
+curl(1) and POSIX.
+
+Building:
+
+    make
+
+Installing:
+
+    make install          # PREFIX=/usr/local
+    make install PREFIX=~ # install to ~/bin and ~/.local/share/man/man1
+
+Configuration lives in $XDG_CONFIG_HOME/jb/config.json.  You need an
+API key in JB_API_KEY or OPENAI_API_KEY.  See jb(1) for full
+documentation.
+
+License: MIT
