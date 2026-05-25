@@ -1,5 +1,5 @@
 CC      = cc
-CFLAGS  = -std=c99 -Wall -Wextra -pedantic -O2 -D_POSIX_C_SOURCE=200809L
+CFLAGS  = -std=c99 -Wall -Wextra -pedantic -O2 -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE
 LDFLAGS = -lcurl
 
 SRCDIR  = src
