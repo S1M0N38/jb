@@ -126,7 +126,7 @@ _Avoid_: Plugin, extension, module
 
 ## Invocation
 
-jb is a pure filter. No arguments, no flags. Reads prompt from stdin, prints answer to stdout. Behavior is fully determined by config.json + environment + working directory + filesystem.
+jb is a filter. Reads prompt from stdin, prints answer to stdout. Behavior is fully determined by config.json + environment + working directory + filesystem.
 
 ```bash
 echo "fix the bug in main.c" | jb
@@ -134,6 +134,16 @@ jb <<< "refactor auth.c"
 cat spec.md | jb
 { echo "Debug this:"; cat backtrace.log; } | jb   # parent jb spawning child
 ```
+
+**Flags**:
+- `jb --version` — print version string to stdout, exit 0
+- `jb --help` — print usage hint pointing to `man jb`, exit 0
+- `jb` (no flags, stdin is a tty) — print usage hint to stderr, exit 3
+- `jb` (no flags, stdin has data) — normal operation
+
+These are the only flags. No other arguments are recognized. Any other token on the command line is silently ignored (the prompt always comes from stdin).
+
+**Version**: Hardcoded as `#define JB_VERSION "x.y"` in a header. Bumped manually on release. Printed by `jb --version` as `jb x.y`.
 
 ## Configuration
 
@@ -150,6 +160,14 @@ cat spec.md | jb
   "max_output_bytes": 51200
 }
 ```
+
+## Documentation
+
+**Man page**: The reference documentation for jb. Installed as `man jb`. Written in standard nroff (`-man` macros). Serves two audiences: humans at a terminal, and jb itself (via `man jb | col -b` through the bash tool). Not a spec — the source code is the source of truth for tool behavior. The man page provides context, conventions, and guidance.
+
+**Self-reference hint**: The system prompt includes one line — "To read your own documentation, run `man jb | col -b`." — so the model knows it can access its own docs. No cost unless the model decides to read the man page.
+
+_Avoid_: README, help flag, --docs, embedded documentation
 
 ## Flagged ambiguities
 
