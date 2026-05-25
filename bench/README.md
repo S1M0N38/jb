@@ -1,10 +1,11 @@
+
 # jb vs pi — Memory Benchmark
 
-**Date:** 2025-05-25
-**Prompt:** `What is 2+2? Reply with just the number.`
-**Model:** zai/glm-5.1 (same for both)
-**Method:** Peak RSS (process + children) sampled every 100ms, best of 3 runs.
-**pi flags:** `--no-session --no-extensions --no-skills --no-themes --no-prompt-templates --no-context-files --offline --thinking off`
+- **Date:** 2025-05-25
+- **Prompt:** `What is 2+2? Reply with just the number.`
+- **Model:** zai/glm-5.1 (same for both)
+- **Method:** Peak RSS (process + children) sampled every 100ms, best of 3 runs.
+- **pi flags:** `--no-session --no-extensions --no-skills --no-themes --no-prompt-templates --no-context-files --offline --thinking off`
 
 ## Results
 
