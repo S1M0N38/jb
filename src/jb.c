@@ -279,6 +279,17 @@ int main(int argc, char **argv)
             fflush(stdout);
             free(g_partial_answer);
             g_partial_answer = strdup(resp.text);
+
+            /* Persist final assistant message to state */
+            cJSON *final_msg = cJSON_CreateObject();
+            cJSON_AddStringToObject(final_msg, "role", "assistant");
+            cJSON_AddStringToObject(final_msg, "content", resp.text);
+            cJSON_AddItemToArray(messages, final_msg);
+            {
+                char *s = cJSON_PrintUnformatted(final_msg);
+                session_append_state(sess, s);
+                free(s);
+            }
         }
         free(resp.text);
         break;
