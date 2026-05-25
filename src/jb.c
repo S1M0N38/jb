@@ -24,7 +24,7 @@ static void handle_signal(int sig)
         g_session_active = 0;
     }
     if (g_partial_answer && g_partial_answer[0]) {
-        printf("%s", g_partial_answer);
+        printf("%s\n", g_partial_answer);
         fflush(stdout);
     }
     _exit(sig == SIGINT ? 130 : 143);
@@ -275,7 +275,7 @@ int main(int argc, char **argv)
 
         /* finish_reason == "stop" — print final answer */
         if (resp.text) {
-            printf("%s", resp.text);
+            printf("%s\n", resp.text);
             fflush(stdout);
             free(g_partial_answer);
             g_partial_answer = strdup(resp.text);
