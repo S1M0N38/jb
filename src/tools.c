@@ -11,6 +11,7 @@
 static long g_max_output_bytes = 51200;
 static long g_max_output_lines = 2000;
 static char g_session_uuid[64] = "";
+static char g_jb_path[4096] = "jb";  /* path to jb binary, default to $PATH lookup */
 static int g_bash_counter = 0;
 
 void tools_set_limits(long max_lines, long max_bytes)
@@ -23,6 +24,11 @@ void tools_set_session(const char *uuid)
 {
     strncpy(g_session_uuid, uuid, sizeof(g_session_uuid) - 1);
     g_bash_counter = 0;
+}
+
+void tools_set_jb_path(const char *path)
+{
+    strncpy(g_jb_path, path, sizeof(g_jb_path) - 1);
 }
 
 cJSON *tools_get_definitions(void)
@@ -157,6 +163,40 @@ cJSON *tools_get_definitions(void)
             cJSON_AddStringToObject(p, "type", "string");
             cJSON_AddStringToObject(p, "description", "Bash command to execute");
             cJSON_AddItemToObject(props, "command", p);
+        }
+        {
+            cJSON *p = cJSON_CreateObject();
+            cJSON_AddStringToObject(p, "type", "integer");
+            cJSON_AddStringToObject(p, "description", "Timeout in seconds");
+            cJSON_AddItemToObject(props, "timeout", p);
+        }
+        cJSON_AddItemToObject(params, "properties", props);
+        cJSON_AddItemToObject(fn, "parameters", params);
+        cJSON_AddItemToObject(t, "function", fn);
+        cJSON_AddItemToArray(arr, t);
+    }
+
+    /* jb tool */
+    {
+        cJSON *t = cJSON_CreateObject();
+        cJSON_AddStringToObject(t, "type", "function");
+        cJSON *fn = cJSON_CreateObject();
+        cJSON_AddStringToObject(fn, "name", "jb");
+        cJSON_AddStringToObject(fn, "description",
+            "Spawn a child jb session to delegate a task. "
+            "The child runs independently and returns its final answer via stdout. "
+            "Use for sub-tasks that benefit from a fresh context — research, exploration, parallel work.");
+        cJSON *params = cJSON_CreateObject();
+        cJSON_AddStringToObject(params, "type", "object");
+        cJSON *required = cJSON_CreateArray();
+        cJSON_AddItemToArray(required, cJSON_CreateString("prompt"));
+        cJSON_AddItemToObject(params, "required", required);
+        cJSON *props = cJSON_CreateObject();
+        {
+            cJSON *p = cJSON_CreateObject();
+            cJSON_AddStringToObject(p, "type", "string");
+            cJSON_AddStringToObject(p, "description", "Task to send to the child session");
+            cJSON_AddItemToObject(props, "prompt", p);
         }
         {
             cJSON *p = cJSON_CreateObject();
@@ -518,12 +558,110 @@ static char *tool_bash(const char *arguments)
     return output;
 }
 
+static char *tool_jb(const char *arguments)
+{
+    cJSON *args = cJSON_Parse(arguments);
+    if (!args) return strdup("Error: malformed arguments");
+
+    cJSON *prompt_j = cJSON_GetObjectItemCaseSensitive(args, "prompt");
+    if (!prompt_j || !cJSON_IsString(prompt_j)) {
+        cJSON_Delete(args);
+        return strdup("Error: 'prompt' is required");
+    }
+
+    const char *prompt = prompt_j->valuestring;
+    int timeout = 0;
+
+    cJSON *timeout_j = cJSON_GetObjectItemCaseSensitive(args, "timeout");
+    if (timeout_j && cJSON_IsNumber(timeout_j)) timeout = timeout_j->valueint;
+
+    /* Write prompt to a temp file to avoid shell quoting issues */
+    char tmpfile[512];
+    snprintf(tmpfile, sizeof(tmpfile), "/tmp/jb-tool-prompt-%s", g_session_uuid);
+    FILE *tf = fopen(tmpfile, "w");
+    if (!tf) {
+        cJSON_Delete(args);
+        return strdup("Error: cannot create temp file for jb tool");
+    }
+    fwrite(prompt, 1, strlen(prompt), tf);
+    fclose(tf);
+
+    /* Build command: cat tempfile | <jb-path> --parent <uuid> */
+    char full_cmd[8192];
+    if (timeout > 0) {
+        snprintf(full_cmd, sizeof(full_cmd),
+            "timeout %d /bin/sh -c 'cat %s | %s --parent %s' 2>&1",
+            timeout, tmpfile, g_jb_path, g_session_uuid);
+    } else {
+        snprintf(full_cmd, sizeof(full_cmd),
+            "cat %s | %s --parent %s 2>&1",
+            tmpfile, g_jb_path, g_session_uuid);
+    }
+
+    FILE *fp = popen(full_cmd, "r");
+    if (!fp) {
+        unlink(tmpfile);
+        cJSON_Delete(args);
+        return strdup("Error: cannot execute jb");
+    }
+
+    /* Read output with truncation — same logic as tool_bash */
+    size_t cap = (size_t)g_max_output_bytes + 1;
+    char *output = malloc(cap);
+    size_t total = 0;
+    char buf[4096];
+    size_t nread;
+    int truncated = 0;
+
+    while ((nread = fread(buf, 1, sizeof(buf), fp)) > 0) {
+        if (total + nread >= cap - 1) {
+            size_t remaining = cap - total - 1;
+            if (remaining > 0) {
+                memcpy(output + total, buf, remaining);
+                total += remaining;
+            }
+            truncated = 1;
+            while (fread(buf, 1, sizeof(buf), fp) > 0) {}
+            break;
+        }
+        memcpy(output + total, buf, nread);
+        total += nread;
+    }
+    output[total] = '\0';
+
+    int status = pclose(fp);
+    unlink(tmpfile);
+    cJSON_Delete(args);
+
+    if (WIFEXITED(status)) {
+        int exit_code = WEXITSTATUS(status);
+        if (exit_code != 0) {
+            char *result = malloc(total + 128);
+            snprintf(result, total + 128, "%s\n[jb child exited with code %d]", output, exit_code);
+            free(output);
+            return result;
+        }
+    }
+
+    if (truncated) {
+        char *result = malloc(total + 128);
+        snprintf(result, total + 128,
+                 "%s\n... (output truncated, %ld bytes max)",
+                 output, g_max_output_bytes);
+        free(output);
+        return result;
+    }
+
+    return output;
+}
+
 char *tool_execute(const char *name, const char *arguments)
 {
     if (strcmp(name, "read") == 0)  return tool_read(arguments);
     if (strcmp(name, "write") == 0) return tool_write(arguments);
     if (strcmp(name, "edit") == 0)  return tool_edit(arguments);
     if (strcmp(name, "bash") == 0)  return tool_bash(arguments);
+    if (strcmp(name, "jb") == 0)    return tool_jb(arguments);
 
     char *err = malloc(128);
     snprintf(err, 128, "Error: unknown tool '%s'", name);

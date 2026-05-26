@@ -17,4 +17,7 @@ void tools_set_limits(long max_lines, long max_bytes);
 /* Set session UUID for temp file naming */
 void tools_set_session(const char *uuid);
 
+/* Set path to jb binary for the jb tool */
+void tools_set_jb_path(const char *path);
+
 #endif
