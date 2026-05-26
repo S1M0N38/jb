@@ -5,6 +5,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <time.h>
 
 static const char *xdg_cache_home(void)
 {
@@ -75,6 +76,9 @@ int session_init(jb_session *sess)
     snprintf(sess->log_path, sizeof(sess->log_path),
         "%s/log.jsonl", sess->session_dir);
 
+    snprintf(sess->metadata_path, sizeof(sess->metadata_path),
+        "%s/metadata.json", sess->session_dir);
+
     /* Create session directory */
     if (mkdirs(sess->session_dir) != 0)
         return -1;
@@ -113,4 +117,85 @@ void session_close(jb_session *sess)
 {
     if (sess->log_fp) { fclose(sess->log_fp); sess->log_fp = NULL; }
     if (sess->state_fp) { fclose(sess->state_fp); sess->state_fp = NULL; }
+}
+
+/* ---- Helpers ---- */
+
+/* Generate ISO 8601 UTC timestamp: "2026-05-25T20:12:00Z" */
+static void iso8601_now(char *out, size_t outlen)
+{
+    time_t now = time(NULL);
+    struct tm *gmt = gmtime(&now);
+    strftime(out, outlen, "%Y-%m-%dT%H:%M:%SZ", gmt);
+}
+
+/* Truncate prompt to ~60 chars at word boundary for title */
+static void make_title(const char *prompt, char *out, size_t outlen)
+{
+    size_t max = 60;
+    /* Take first line only */
+    const char *nl = strchr(prompt, '\n');
+    size_t len = nl ? (size_t)(nl - prompt) : strlen(prompt);
+
+    if (len <= max) {
+        snprintf(out, outlen, "%.*s", (int)len, prompt);
+        return;
+    }
+
+    /* Cut at word boundary */
+    size_t cut = max;
+    while (cut > 0 && prompt[cut] != ' ') cut--;
+    if (cut == 0) cut = max;  /* no space found, hard cut */
+
+    snprintf(out, outlen, "%.*s...", (int)cut, prompt);
+}
+
+/* Write metadata.json to session directory */
+static int write_metadata_file(const char *path, const char *json)
+{
+    FILE *f = fopen(path, "w");
+    if (!f) return -1;
+    fprintf(f, "%s\n", json);
+    fclose(f);
+    return 0;
+}
+
+int session_write_metadata_init(jb_session *sess, const char *prompt,
+                                const char *working_dir, const char *model)
+{
+    /* Derive title from prompt */
+    char title_buf[128];
+    make_title(prompt, title_buf, sizeof(title_buf));
+
+    /* Store for later use at close */
+    snprintf(sess->title, sizeof(sess->title), "%s", title_buf);
+    snprintf(sess->working_dir, sizeof(sess->working_dir), "%s", working_dir);
+    snprintf(sess->model, sizeof(sess->model), "%s", model);
+
+    iso8601_now(sess->started_at, sizeof(sess->started_at));
+
+    /* Build JSON manually — no cJSON dependency for this simple flat object */
+    char json[1024];
+    int n = snprintf(json, sizeof(json),
+        "{\"uuid\":\"%s\",\"status\":\"running\",\"title\":\"%s\",\"started_at\":\"%s\",\"working_dir\":\"%s\",\"model\":\"%s\"}",
+        sess->uuid, title_buf, sess->started_at, working_dir, model);
+
+    if (n < 0 || (size_t)n >= sizeof(json)) return -1;
+    return write_metadata_file(sess->metadata_path, json);
+}
+
+int session_write_metadata_close(jb_session *sess, const char *status,
+                                 long tokens_used, int turns, int exit_code)
+{
+    char ended_at[32];
+    iso8601_now(ended_at, sizeof(ended_at));
+
+    char json[2048];
+    int n = snprintf(json, sizeof(json),
+        "{\"uuid\":\"%s\",\"status\":\"%s\",\"title\":\"%s\",\"started_at\":\"%s\",\"ended_at\":\"%s\",\"working_dir\":\"%s\",\"model\":\"%s\",\"tokens_used\":%ld,\"turns\":%d,\"exit_code\":%d}",
+        sess->uuid, status, sess->title, sess->started_at, ended_at,
+        sess->working_dir, sess->model, tokens_used, turns, exit_code);
+
+    if (n < 0 || (size_t)n >= sizeof(json)) return -1;
+    return write_metadata_file(sess->metadata_path, json);
 }

@@ -132,6 +132,13 @@ int main(int argc, char **argv)
         return 3;
     }
 
+    /* Get working directory */
+    char cwd_buf[4096];
+    const char *cwd = getcwd(cwd_buf, sizeof(cwd_buf)) ? cwd_buf : ".";
+
+    /* Write initial metadata (status: running) — derives title from prompt */
+    session_write_metadata_init(sess, user_prompt, cwd, cfg.model);
+
     /* Build system prompt */
     char *sys_prompt = prompt_build();
 
@@ -300,6 +307,20 @@ int main(int argc, char **argv)
         char msg[128];
         snprintf(msg, sizeof(msg), "{\"event\":\"done\",\"tokens\":%ld,\"turns\":%d}", total_tokens, turn);
         session_append_log(sess, msg);
+    }
+
+    /* Write final metadata (overwrite with completed/error status) */
+    {
+        const char *status;
+        switch (exit_code) {
+            case 0:   status = "completed"; break;
+            case 1:   status = "error"; break;
+            case 2:   status = "budget_exhausted"; break;
+            case 130: status = "interrupted"; break;
+            case 143: status = "terminated"; break;
+            default:  status = "unknown"; break;
+        }
+        session_write_metadata_close(sess, status, total_tokens, turn, exit_code);
     }
 
     cJSON_Delete(messages);
