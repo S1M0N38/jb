@@ -55,14 +55,27 @@ assert_dir_exists() {
     fi
 }
 
+skip() { PASS=$((PASS + 1)); TOTAL=$((TOTAL + 1)); echo "  SKIP: $1 ${2:+— $2}"; }
+
 JB="./jb"
 
-echo "=== jb test suite ==="
-for t in tests/test_*.sh; do
-    echo ""
-    echo "--- $(basename "$t") ---"
-    . "$t"
-done
+# Support running specific tests: make test-TESTNAME
+if [ -n "$TEST_FILTER" ]; then
+    echo "=== jb test suite (filter: $TEST_FILTER) ==="
+    for t in tests/test_${TEST_FILTER}.sh; do
+        [ -f "$t" ] || { echo "No test matching: test_${TEST_FILTER}.sh" >&2; exit 1; }
+        echo ""
+        echo "--- $(basename "$t") ---"
+        . "$t"
+    done
+else
+    echo "=== jb test suite ==="
+    for t in tests/test_*.sh; do
+        echo ""
+        echo "--- $(basename "$t") ---"
+        . "$t"
+    done
+fi
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed, $TOTAL total ==="

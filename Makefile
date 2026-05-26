@@ -40,3 +40,6 @@ install: $(TARGET)
 
 test: $(TARGET)
 	@chmod +x tests/run.sh && sh tests/run.sh
+
+test-%: $(TARGET)
+	@chmod +x tests/run.sh && TEST_FILTER="$*" sh tests/run.sh
