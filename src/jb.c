@@ -86,15 +86,21 @@ static int api_chat_with_retry(const jb_config *cfg, cJSON *messages, cJSON *too
 
 int main(int argc, char **argv)
 {
-    /* Flag parsing — only --version and --help are recognized */
+    /* Flag parsing — --version, --help, --parent */
+    char *parent_uuid = NULL;
     if (argc > 1) {
-        if (strcmp(argv[1], "--version") == 0) {
-            printf("jb %s\n", JB_VERSION);
-            return 0;
-        }
-        if (strcmp(argv[1], "--help") == 0) {
-            printf("jb — a minimal agentic coding loop. See jb(1).\n");
-            return 0;
+        for (int i = 1; i < argc; i++) {
+            if (strcmp(argv[i], "--version") == 0) {
+                printf("jb %s\n", JB_VERSION);
+                return 0;
+            }
+            if (strcmp(argv[i], "--help") == 0) {
+                printf("jb — a minimal agentic coding loop. See jb(1).\n");
+                return 0;
+            }
+            if (strcmp(argv[i], "--parent") == 0 && i + 1 < argc) {
+                parent_uuid = argv[++i];
+            }
         }
     }
 
@@ -117,6 +123,11 @@ int main(int argc, char **argv)
     }
     g_session_active = 1;
 
+    /* Set parent UUID if provided */
+    if (parent_uuid) {
+        session_set_parent(&g_session, parent_uuid);
+    }
+
     /* Install signal handlers */
     signal(SIGINT, handle_signal);
     signal(SIGTERM, handle_signal);
@@ -135,6 +146,22 @@ int main(int argc, char **argv)
     /* Get working directory */
     char cwd_buf[4096];
     const char *cwd = getcwd(cwd_buf, sizeof(cwd_buf)) ? cwd_buf : ".";
+
+    /* Resolve jb binary path for the jb tool */
+    char jb_abs[4096];
+    if (argv[0][0] == '/') {
+        strncpy(jb_abs, argv[0], sizeof(jb_abs) - 1);
+    } else {
+        /* Resolve relative to cwd */
+        snprintf(jb_abs, sizeof(jb_abs), "%s/%s", cwd, argv[0]);
+    }
+    /* Canonicalize (remove . and ..) */
+    char jb_resolved[4096];
+    if (realpath(jb_abs, jb_resolved)) {
+        tools_set_jb_path(jb_resolved);
+    } else {
+        tools_set_jb_path(argv[0]);  /* fallback */
+    }
 
     /* Write initial metadata (status: running) — derives title from prompt */
     session_write_metadata_init(sess, user_prompt, cwd, cfg.model);
