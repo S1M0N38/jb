@@ -1,4 +1,4 @@
-# Contrib — jb Viewer & Listing Tools
+# Contrib — jb Listing Tools
 
 Companion shell scripts for browsing jb sessions. All scripts read session data
 from `$XDG_CACHE_HOME/jb/sessions/`.

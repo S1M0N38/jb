@@ -1,5 +1,5 @@
 #!/bin/sh
-# jb-view — sidecar session viewer for jb
+# jb-view — sidecar session formatter for jb
 # Reads state.jsonl and formats events as a streaming log.
 # Upgraded: reads metadata.json for enriched session header.
 
@@ -43,7 +43,7 @@ fi
 if [ -f "$META_FILE" ]; then
     _uuid=$(jq -r '.uuid // empty' "$META_FILE" 2>/dev/null)
     _status=$(jq -r '.status // empty' "$META_FILE" 2>/dev/null)
-    _model=$(jq -r '.model // empty' "$META_FILE" 2>/dev/null)
+    _model=$(jq -r '.config.model // empty' "$META_FILE" 2>/dev/null)
     _turns=$(jq -r '.turns // empty' "$META_FILE" 2>/dev/null)
     _title=$(jq -r '.title // empty' "$META_FILE" 2>/dev/null)
 
@@ -214,7 +214,7 @@ process_line() {
                     _tc_args=$(printf '%s' "$_tc" | jq -r '.function.arguments // ""' 2>/dev/null)
                     store_tool_call "$_tc_id" "$_tc_name" "$_tc_args"
                     render_tool_call_header "$_tc_name" "$_tc_args"
-                    _tc_i=$((_tc + 1))
+                    _tc_i=$((_tc_i + 1))
                 done
             elif [ -n "$_content" ] && [ "$_content" != "null" ] && [ "$_content" != "" ]; then
                 render_answer "$_content"

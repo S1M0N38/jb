@@ -12,6 +12,10 @@ jb \- a minimal agentic coding loop
 .BR jb
 .br
 .B jb
+.B \-\-config
+.I path
+.br
+.B jb
 .B \-\-parent
 .I uuid
 .br
@@ -36,6 +40,23 @@ and
 .BR \-\-help .
 Behavior is determined entirely by the configuration file, the working
 directory, and the filesystem.
+.PP
+The
+.B \-\-config
+flag specifies an alternate configuration file.
+Relative paths are resolved to absolute.
+Child
+.B jb
+processes (spawned via the
+.B jb
+tool) inherit the
+.B \-\-config
+flag automatically.
+Exactly one
+.B \-\-config
+is allowed; duplicates or a bare
+.B \-\-config
+without a path cause an error (exit 3).
 .PP
 The
 .B \-\-parent
@@ -147,7 +168,10 @@ appended to the system prompt unconditionally.
 .SH CONFIGURATION
 .B jb
 reads its configuration from
-.BR $XDG_CONFIG_HOME/jb/config.json .
+.B $XDG_CONFIG_HOME/jb/config.json
+by default, or from a file specified via
+.BR \-\-config \~\fIpath\fR .
+Relative paths are resolved to absolute.
 .PP
 .RS
 .nf
@@ -198,7 +222,7 @@ Session state \(em the full conversation as JSONL.
 Session log \(em raw SSE events for observability.
 .TP
 .B $XDG_CACHE_HOME/jb/sessions/<uuid>/metadata.json
-Session metadata \(em status, title, timing, model, and optional parent UUID.
+Session metadata \(em status, title, timing, config snapshot, and optional parent UUID.
 .TP
 .B AGENTS.md
 Project context file.  Walked from cwd upward.

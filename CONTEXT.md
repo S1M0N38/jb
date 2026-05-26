@@ -16,19 +16,17 @@ A minimal agentic coding loop — single C binary, zero runtime deps except `cur
 
 **Provider**: Any OpenAI Chat Completions-compatible API endpoint. Cloud (OpenAI, DeepSeek, etc.) or local (Ollama, llama.cpp, etc.).
 
-**Session metadata**: A `metadata.json` file written into each session directory at two points: (1) at session init with `status: "running"`, title (truncated prompt prefix), start time, working directory, model, and optionally `parent` UUID; (2) at session close with final status, end time, tokens used, turn count, exit code. The `parent` field is present only when the session was spawned by another session (via `--parent` flag). Enables viewers to list and search sessions without parsing `state.jsonl`. See [ADR-0004](docs/adr/0004-session-metadata.md).
+**Session metadata**: A `metadata.json` file written into each session directory at two points: (1) at session init with `status: "running"`, title (truncated prompt prefix), start time, working directory, config snapshot, and optionally `parent` UUID; (2) at session close with final status, end time, tokens used, turn count, exit code. The `parent` field is present only when the session was spawned by another session (via `--parent` flag). The `config` field is a snapshot of the effective config (all five fields: `api_url`, `model`, `max_tokens`, `max_output_lines`, `max_output_bytes` — no API key). Enables tools to list and search sessions without parsing `state.jsonl`. See [ADR-0004](docs/adr/0004-session-metadata.md).
 
 **Session lister**: A sidecar shell script (`contrib/jb-list`) that scans all session directories and outputs their `metadata.json` as JSONL (one object per line). Composable via pipes and jq. jb knows nothing about it.
 
-**Session viewer**: A sidecar shell script (`contrib/jb-view`) that reads a session's `metadata.json` for its header and renders `state.jsonl` into a readable formatted log. Works on live (tail -f) or completed sessions. jb knows nothing about it.
-
-_Avoid_: Plugin, extension, module, GUI, TUI (jb has none of these; viewers are formatters, not interactive UIs)
+_Avoid_: Plugin, extension, module, GUI, TUI (jb has none of these)
 
 ## Streams
 
 - **stdout** — the model's final text message only. Written once after the turn completes. Never partial. Clean pipe citizen.
 - **stderr** — silent always (Rule of Silence). All diagnostics go to the session log.
-- **Session log** — raw SSE events written in real-time to `$XDG_CACHE_HOME/jb/sessions/<uuid>/log.jsonl`. Full transcript. `tail -f` is the UI. A future viewer can parse and present the events.
+- **Session log** — raw SSE events written in real-time to `$XDG_CACHE_HOME/jb/sessions/<uuid>/log.jsonl`. Full transcript. `tail -f` is the UI.
 - **Session state** — append-only JSONL at `$XDG_CACHE_HOME/jb/sessions/<uuid>/state.jsonl` — one JSON object per line, each representing a message. The full conversation. Rebuilt on startup by reading all lines.
 - **Session metadata** — a `metadata.json` at `$XDG_CACHE_HOME/jb/sessions/<uuid>/metadata.json` written at session init (status: running) and overwritten at close (final status, token/turn counts).
 - **Temp files** — bash output exceeding `max_output_bytes` saved to `$TMPDIR/jb-<uuid>-bash-<N>.out` (respects `$TMPDIR`, defaults to `/tmp`). Path included in tool result.
@@ -148,18 +146,18 @@ cat spec.md | jb
 - `jb --version` — print version string to stdout, exit 0
 - `jb --help` — print usage hint pointing to `man jb`, exit 0
 - `jb --parent <uuid>` — declare the UUID of the parent session. Stored in `metadata.json` as the `parent` field. Not validated — the UUID is a pointer, not a guarantee. Invisible to the model when used via the `jb` tool (auto-injected).
+- `jb --config <path>` — load config from the specified file instead of `$XDG_CONFIG_HOME/jb/config.json`. Relative paths resolved to absolute via `realpath()`. Exactly one `--config` allowed; duplicates exit 3 with error. Bare `--config` (no value) exits 3 with error. Child jb processes (via the `jb` tool) inherit `--config` automatically.
 - `jb` (no flags, stdin is a tty) — print usage hint to stderr, exit 3
 - `jb` (no flags, stdin has data) — normal operation
 
-No other arguments are recognized. Any other token on the command line is silently ignored (the prompt always comes from stdin).
+Any other token on the command line is silently ignored (the prompt always comes from stdin).
 
 **Version**: Hardcoded as `#define JB_VERSION "x.y"` in a header. Bumped manually on release. Printed by `jb --version` as `jb x.y`.
 
 ## Configuration
 
-- **Config file**: `$XDG_CONFIG_HOME/jb/config.json`
+- **Config file**: `$XDG_CONFIG_HOME/jb/config.json` (default), or any file specified via `--config <path>`
 - **API key**: `JB_API_KEY` or `OPENAI_API_KEY` environment variable
-- **No flags, no arguments, no CLI options**
 
 ```json
 {
