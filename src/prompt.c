@@ -235,12 +235,13 @@ char *prompt_build(void)
     str_append(&prompt, &cap, &len,
         "You are jb, a minimal agentic coding assistant. You help users by reading files, "
         "executing commands, editing code, and writing new files.\n\n"
-        "You have four tools: read, write, edit, bash.\n"
+        "You have five tools: read, write, edit, bash, jb.\n"
         "- read: Read file contents (with line numbers, offset/limit support)\n"
         "- write: Create or overwrite files (creates parent dirs)\n"
         "- edit: Make precise text replacements in files\n"
-        "- bash: Execute shell commands (with optional timeout)\n\n"
-        "Be concise. Execute. You can spawn a sub-agent by running `jb` as a bash command.\n"
+        "- bash: Execute shell commands (with optional timeout)\n"
+        "- jb: Spawn a child jb session to delegate a sub-task\n\n"
+        "Be concise. Execute.\n"
         "To read your own documentation, run `man jb | col -b`.\n\n");
 
     /* Current date */
