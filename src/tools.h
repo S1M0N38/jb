@@ -20,4 +20,7 @@ void tools_set_session(const char *uuid);
 /* Set path to jb binary for the jb tool */
 void tools_set_jb_path(const char *path);
 
+/* Set config file path for child jb inheritance */
+void tools_set_config_path(const char *path);
+
 #endif

@@ -12,6 +12,7 @@ static long g_max_output_bytes = 51200;
 static long g_max_output_lines = 2000;
 static char g_session_uuid[64] = "";
 static char g_jb_path[4096] = "jb";  /* path to jb binary, default to $PATH lookup */
+static char g_config_path[4096] = "";  /* config file path for child inheritance */
 static int g_bash_counter = 0;
 
 void tools_set_limits(long max_lines, long max_bytes)
@@ -29,6 +30,15 @@ void tools_set_session(const char *uuid)
 void tools_set_jb_path(const char *path)
 {
     strncpy(g_jb_path, path, sizeof(g_jb_path) - 1);
+}
+
+void tools_set_config_path(const char *path)
+{
+    if (path) {
+        strncpy(g_config_path, path, sizeof(g_config_path) - 1);
+    } else {
+        g_config_path[0] = '\0';
+    }
 }
 
 cJSON *tools_get_definitions(void)
@@ -586,16 +596,30 @@ static char *tool_jb(const char *arguments)
     fwrite(prompt, 1, strlen(prompt), tf);
     fclose(tf);
 
-    /* Build command: cat tempfile | <jb-path> --parent <uuid> */
-    char full_cmd[8192];
+    /* Build command: cat tempfile | <jb-path> [--config <path>] --parent <uuid> */
+    char full_cmd[12288];
+    const char *config_arg = g_config_path[0] ? g_config_path : NULL;
+
     if (timeout > 0) {
-        snprintf(full_cmd, sizeof(full_cmd),
-            "timeout %d /bin/sh -c 'cat %s | %s --parent %s' 2>&1",
-            timeout, tmpfile, g_jb_path, g_session_uuid);
+        if (config_arg) {
+            snprintf(full_cmd, sizeof(full_cmd),
+                "timeout %d /bin/sh -c 'cat %s | %s --config %s --parent %s' 2>&1",
+                timeout, tmpfile, g_jb_path, config_arg, g_session_uuid);
+        } else {
+            snprintf(full_cmd, sizeof(full_cmd),
+                "timeout %d /bin/sh -c 'cat %s | %s --parent %s' 2>&1",
+                timeout, tmpfile, g_jb_path, g_session_uuid);
+        }
     } else {
-        snprintf(full_cmd, sizeof(full_cmd),
-            "cat %s | %s --parent %s 2>&1",
-            tmpfile, g_jb_path, g_session_uuid);
+        if (config_arg) {
+            snprintf(full_cmd, sizeof(full_cmd),
+                "cat %s | %s --config %s --parent %s 2>&1",
+                tmpfile, g_jb_path, config_arg, g_session_uuid);
+        } else {
+            snprintf(full_cmd, sizeof(full_cmd),
+                "cat %s | %s --parent %s 2>&1",
+                tmpfile, g_jb_path, g_session_uuid);
+        }
     }
 
     FILE *fp = popen(full_cmd, "r");

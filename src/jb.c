@@ -86,8 +86,10 @@ static int api_chat_with_retry(const jb_config *cfg, cJSON *messages, cJSON *too
 
 int main(int argc, char **argv)
 {
-    /* Flag parsing — --version, --help, --parent */
+    /* Flag parsing — --version, --help, --parent, --config */
     char *parent_uuid = NULL;
+    char *config_path = NULL;
+    int config_count = 0;
     if (argc > 1) {
         for (int i = 1; i < argc; i++) {
             if (strcmp(argv[i], "--version") == 0) {
@@ -101,6 +103,18 @@ int main(int argc, char **argv)
             if (strcmp(argv[i], "--parent") == 0 && i + 1 < argc) {
                 parent_uuid = argv[++i];
             }
+            if (strcmp(argv[i], "--config") == 0) {
+                config_count++;
+                if (config_count > 1) {
+                    fprintf(stderr, "jb: --config specified multiple times\n");
+                    return 3;
+                }
+                if (i + 1 >= argc) {
+                    fprintf(stderr, "jb: --config requires a path\n");
+                    return 3;
+                }
+                config_path = argv[++i];
+            }
         }
     }
 
@@ -113,9 +127,12 @@ int main(int argc, char **argv)
     jb_config cfg;
 
     /* Load config — exits with code 3 on failure */
-    if (config_load(&cfg) != 0) {
+    if (config_load(&cfg, config_path) != 0) {
         return 3;
     }
+
+    /* Pass resolved config path to tools for child jb inheritance */
+    tools_set_config_path(config_get_resolved_path());
 
     /* Initialize session */
     if (session_init(&g_session) != 0) {
@@ -164,7 +181,7 @@ int main(int argc, char **argv)
     }
 
     /* Write initial metadata (status: running) — derives title from prompt */
-    session_write_metadata_init(sess, user_prompt, cwd, cfg.model);
+    session_write_metadata_init(sess, user_prompt, cwd, &cfg);
 
     /* Build system prompt */
     char *sys_prompt = prompt_build();

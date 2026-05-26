@@ -5,6 +5,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Track resolved config path for child inheritance */
+static char g_resolved_path[4096] = "";
+
 static char *read_file(const char *path)
 {
     FILE *f = fopen(path, "rb");
@@ -32,7 +35,7 @@ static const char *xdg_config_home(void)
     return buf;
 }
 
-int config_load(jb_config *cfg)
+int config_load(jb_config *cfg, const char *config_path)
 {
     /* Defaults */
     memset(cfg, 0, sizeof(*cfg));
@@ -44,10 +47,23 @@ int config_load(jb_config *cfg)
 
     /* Build config path */
     char path[4096];
-    snprintf(path, sizeof(path), "%s/jb/config.json", xdg_config_home());
+    if (config_path) {
+        /* Resolve to absolute path */
+        if (!realpath(config_path, path)) {
+            fprintf(stderr, "jb: config: %s: No such file or directory\n", config_path);
+            return -1;
+        }
+    } else {
+        snprintf(path, sizeof(path), "%s/jb/config.json", xdg_config_home());
+    }
 
     char *json = read_file(path);
-    if (!json) return -1;  /* config file must exist */
+    if (!json) {
+        if (config_path) {
+            fprintf(stderr, "jb: config: %s: cannot read file\n", config_path);
+        }
+        return -1;  /* config file must exist */
+    }
 
     cJSON *root = cJSON_Parse(json);
     free(json);
@@ -77,10 +93,20 @@ int config_load(jb_config *cfg)
 
     cJSON_Delete(root);
 
+    /* Save resolved config path for child inheritance */
+    if (config_path) {
+        strncpy(g_resolved_path, path, sizeof(g_resolved_path) - 1);
+    }
+
     /* API key is required from environment */
     const char *key = getenv("JB_API_KEY");
     if (!key || !key[0]) key = getenv("OPENAI_API_KEY");
     if (!key || !key[0]) return -1;
 
     return 0;
+}
+
+const char *config_get_resolved_path(void)
+{
+    return g_resolved_path[0] ? g_resolved_path : NULL;
 }
