@@ -12,6 +12,10 @@ jb \- a minimal agentic coding loop
 .BR jb
 .br
 .B jb
+.B \-\-parent
+.I uuid
+.br
+.B jb
 .B \-\-version
 .br
 .B jb
@@ -32,6 +36,14 @@ and
 .BR \-\-help .
 Behavior is determined entirely by the configuration file, the working
 directory, and the filesystem.
+.PP
+The
+.B \-\-parent
+flag records a parent session UUID in the session metadata,
+creating a session tree for observability.  It is typically
+auto-injected by the
+.B jb
+tool and not used directly.
 .
 .SS The Agentic Loop
 Each
@@ -52,7 +64,7 @@ If a configurable token budget is exhausted, the partial answer is
 printed and the process exits with code 2.
 .
 .SS Tools
-The model has access to four tools:
+The model has access to five tools:
 .TP
 .BR read " \fIpath\fR [offset=\fIN\fR] [limit=\fIN\fR]"
 Read file contents with line numbers.  Supports offset and limit for
@@ -70,12 +82,22 @@ single call.
 Execute a shell command.  The model decides the timeout per command.
 If omitted, the command runs to completion.
 .PP
+.TP
+.BR jb " \fIprompt\fR [timeout=\fIN\fR]"
+Spawn a child
+.B jb
+session to delegate a task.  The child runs independently
+and returns its final answer via stdout.  The parent session
+UUID is automatically injected \(em the model does not see it.
+The child's metadata records the parent, forming a session tree.
+.PP
 A sub-agent is a child
 .B jb
 process spawned via the
-.B bash
+.B jb
 tool.  It has its own session, its own API calls, and returns its
-answer via stdout.
+answer via stdout.  The child starts with a fresh context \(em
+it does not inherit the parent's conversation.
 .
 .SS Session Model
 Each run creates a session directory under
@@ -174,6 +196,9 @@ Session state \(em the full conversation as JSONL.
 .TP
 .B $XDG_CACHE_HOME/jb/sessions/<uuid>/log.jsonl
 Session log \(em raw SSE events for observability.
+.TP
+.B $XDG_CACHE_HOME/jb/sessions/<uuid>/metadata.json
+Session metadata \(em status, title, timing, model, and optional parent UUID.
 .TP
 .B AGENTS.md
 Project context file.  Walked from cwd upward.
