@@ -170,7 +170,7 @@ static int write_metadata_file(const char *path, const char *json)
 }
 
 int session_write_metadata_init(jb_session *sess, const char *prompt,
-                                const char *working_dir, const char *model)
+                                const char *working_dir, const jb_config *cfg)
 {
     /* Derive title from prompt */
     char title_buf[128];
@@ -179,21 +179,24 @@ int session_write_metadata_init(jb_session *sess, const char *prompt,
     /* Store for later use at close */
     snprintf(sess->title, sizeof(sess->title), "%s", title_buf);
     snprintf(sess->working_dir, sizeof(sess->working_dir), "%s", working_dir);
-    snprintf(sess->model, sizeof(sess->model), "%s", model);
+    snprintf(sess->model, sizeof(sess->model), "%s", cfg->model);
+    sess->cfg_snapshot = *cfg;  /* snapshot for close metadata */
 
     iso8601_now(sess->started_at, sizeof(sess->started_at));
 
-    /* Build JSON manually — no cJSON dependency for this simple flat object */
-    char json[1536];
+    /* Build JSON manually — config object replaces top-level model */
+    char json[2048];
     int n;
     if (sess->parent[0]) {
         n = snprintf(json, sizeof(json),
-            "{\"uuid\":\"%s\",\"parent\":\"%s\",\"status\":\"running\",\"title\":\"%s\",\"started_at\":\"%s\",\"working_dir\":\"%s\",\"model\":\"%s\"}",
-            sess->uuid, sess->parent, title_buf, sess->started_at, working_dir, model);
+            "{\"uuid\":\"%s\",\"parent\":\"%s\",\"status\":\"running\",\"title\":\"%s\",\"started_at\":\"%s\",\"working_dir\":\"%s\",\"config\":{\"api_url\":\"%s\",\"model\":\"%s\",\"max_tokens\":%ld,\"max_output_lines\":%ld,\"max_output_bytes\":%ld}}",
+            sess->uuid, sess->parent, title_buf, sess->started_at, working_dir,
+            cfg->api_url, cfg->model, cfg->max_tokens, cfg->max_output_lines, cfg->max_output_bytes);
     } else {
         n = snprintf(json, sizeof(json),
-            "{\"uuid\":\"%s\",\"status\":\"running\",\"title\":\"%s\",\"started_at\":\"%s\",\"working_dir\":\"%s\",\"model\":\"%s\"}",
-            sess->uuid, title_buf, sess->started_at, working_dir, model);
+            "{\"uuid\":\"%s\",\"status\":\"running\",\"title\":\"%s\",\"started_at\":\"%s\",\"working_dir\":\"%s\",\"config\":{\"api_url\":\"%s\",\"model\":\"%s\",\"max_tokens\":%ld,\"max_output_lines\":%ld,\"max_output_bytes\":%ld}}",
+            sess->uuid, title_buf, sess->started_at, working_dir,
+            cfg->api_url, cfg->model, cfg->max_tokens, cfg->max_output_lines, cfg->max_output_bytes);
     }
 
     if (n < 0 || (size_t)n >= sizeof(json)) return -1;
@@ -210,14 +213,22 @@ int session_write_metadata_close(jb_session *sess, const char *status,
     int n;
     if (sess->parent[0]) {
         n = snprintf(json, sizeof(json),
-            "{\"uuid\":\"%s\",\"parent\":\"%s\",\"status\":\"%s\",\"title\":\"%s\",\"started_at\":\"%s\",\"ended_at\":\"%s\",\"working_dir\":\"%s\",\"model\":\"%s\",\"tokens_used\":%ld,\"turns\":%d,\"exit_code\":%d}",
+            "{\"uuid\":\"%s\",\"parent\":\"%s\",\"status\":\"%s\",\"title\":\"%s\",\"started_at\":\"%s\",\"ended_at\":\"%s\",\"working_dir\":\"%s\",\"config\":{\"api_url\":\"%s\",\"model\":\"%s\",\"max_tokens\":%ld,\"max_output_lines\":%ld,\"max_output_bytes\":%ld},\"tokens_used\":%ld,\"turns\":%d,\"exit_code\":%d}",
             sess->uuid, sess->parent, status, sess->title, sess->started_at, ended_at,
-            sess->working_dir, sess->model, tokens_used, turns, exit_code);
+            sess->working_dir,
+            sess->cfg_snapshot.api_url, sess->cfg_snapshot.model,
+            sess->cfg_snapshot.max_tokens, sess->cfg_snapshot.max_output_lines,
+            sess->cfg_snapshot.max_output_bytes,
+            tokens_used, turns, exit_code);
     } else {
         n = snprintf(json, sizeof(json),
-            "{\"uuid\":\"%s\",\"status\":\"%s\",\"title\":\"%s\",\"started_at\":\"%s\",\"ended_at\":\"%s\",\"working_dir\":\"%s\",\"model\":\"%s\",\"tokens_used\":%ld,\"turns\":%d,\"exit_code\":%d}",
+            "{\"uuid\":\"%s\",\"status\":\"%s\",\"title\":\"%s\",\"started_at\":\"%s\",\"ended_at\":\"%s\",\"working_dir\":\"%s\",\"config\":{\"api_url\":\"%s\",\"model\":\"%s\",\"max_tokens\":%ld,\"max_output_lines\":%ld,\"max_output_bytes\":%ld},\"tokens_used\":%ld,\"turns\":%d,\"exit_code\":%d}",
             sess->uuid, status, sess->title, sess->started_at, ended_at,
-            sess->working_dir, sess->model, tokens_used, turns, exit_code);
+            sess->working_dir,
+            sess->cfg_snapshot.api_url, sess->cfg_snapshot.model,
+            sess->cfg_snapshot.max_tokens, sess->cfg_snapshot.max_output_lines,
+            sess->cfg_snapshot.max_output_bytes,
+            tokens_used, turns, exit_code);
     }
 
     if (n < 0 || (size_t)n >= sizeof(json)) return -1;

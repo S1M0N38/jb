@@ -51,11 +51,11 @@ else
             fail "metadata has started_at field" "missing"
         fi
 
-        _has_model=$(printf '%s' "$_meta" | jq -r '.model // empty' 2>/dev/null)
+        _has_model=$(printf '%s' "$_meta" | jq -r '.config.model // empty' 2>/dev/null)
         if [ -n "$_has_model" ]; then
-            pass "metadata has model field"
+            pass "metadata has config.model field"
         else
-            fail "metadata has model field" "missing"
+            fail "metadata has config.model field" "missing"
         fi
 
         _has_working_dir=$(printf '%s' "$_meta" | jq -r '.working_dir // empty' 2>/dev/null)

@@ -3,6 +3,7 @@
 #define JB_SESSION_H
 
 #include <stdio.h>
+#include "config.h"
 
 #define JB_UUID_LEN 37  /* 36 chars + null */
 
@@ -16,6 +17,7 @@ typedef struct {
     char started_at[32];      /* ISO 8601 timestamp */
     char working_dir[4096];   /* cwd at session start */
     char model[128];          /* model name */
+    jb_config cfg_snapshot;    /* config snapshot for metadata close */
     char parent[JB_UUID_LEN]; /* parent session UUID, empty string if none */
     FILE *log_fp;
     FILE *state_fp;
@@ -37,7 +39,7 @@ int session_append_log(jb_session *sess, const char *line);
    The prompt is used to derive a session title.
    Returns 0 on success, -1 on error. */
 int session_write_metadata_init(jb_session *sess, const char *prompt,
-                                const char *working_dir, const char *model);
+                                const char *working_dir, const jb_config *cfg);
 
 /* Write final metadata.json (overwrite with completed status).
    Returns 0 on success, -1 on error. */
