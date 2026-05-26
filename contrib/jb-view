@@ -56,6 +56,13 @@ if [ -f "$META_FILE" ]; then
     [ -n "$_model" ] && _header_parts="$_header_parts  $_model"
     [ -n "$_turns" ] && [ "$_turns" != "null" ] && _header_parts="$_header_parts  ${_turns} turns"
 
+    # Show parent if present
+    _parent=$(jq -r '.parent // empty' "$META_FILE" 2>/dev/null)
+    if [ -n "$_parent" ]; then
+        _short_parent=$(printf '%s' "$_parent" | cut -c1-8)
+        _header_parts="$_header_parts  parent:$_short_parent"
+    fi
+
     printf "${D}session %s${R}\n" "$_header_parts"
     [ -n "$_title" ] && printf "${D}> %s${R}\n\n" "$_title"
 else
@@ -107,6 +114,7 @@ render_tool_call_header() {
         write) _summary=$(printf '%s' "$_args" | jq -r '.path // ""' 2>/dev/null) ;;
         edit)  _summary=$(printf '%s' "$_args" | jq -r '.path // ""' 2>/dev/null) ;;
         bash)  _summary=$(printf '%s' "$_args" | jq -r '.command // ""' 2>/dev/null) ;;
+        jb)    _summary=$(printf '%s' "$_args" | jq -r '.prompt // ""' 2>/dev/null | head -c 60) ;;
         *)     _summary=$(printf '%s' "$_args" | head -c 80 2>/dev/null) ;;
     esac
     printf "${YEL}${B}%s${R} ${D}%s${R}\n" "$_name" "$_summary"
