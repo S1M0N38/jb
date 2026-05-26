@@ -63,6 +63,7 @@ static int mkdirs(const char *path)
 int session_init(jb_session *sess)
 {
     memset(sess, 0, sizeof(*sess));
+    sess->parent[0] = '\0';
 
     if (generate_uuid(sess->uuid, sizeof(sess->uuid)) != 0)
         return -1;
@@ -111,6 +112,14 @@ int session_append_log(jb_session *sess, const char *line)
     fprintf(sess->log_fp, "%s\n", line);
     fflush(sess->log_fp);
     return 0;
+}
+
+void session_set_parent(jb_session *sess, const char *parent_uuid)
+{
+    if (parent_uuid && parent_uuid[0]) {
+        strncpy(sess->parent, parent_uuid, JB_UUID_LEN - 1);
+        sess->parent[JB_UUID_LEN - 1] = '\0';
+    }
 }
 
 void session_close(jb_session *sess)
@@ -175,10 +184,17 @@ int session_write_metadata_init(jb_session *sess, const char *prompt,
     iso8601_now(sess->started_at, sizeof(sess->started_at));
 
     /* Build JSON manually — no cJSON dependency for this simple flat object */
-    char json[1024];
-    int n = snprintf(json, sizeof(json),
-        "{\"uuid\":\"%s\",\"status\":\"running\",\"title\":\"%s\",\"started_at\":\"%s\",\"working_dir\":\"%s\",\"model\":\"%s\"}",
-        sess->uuid, title_buf, sess->started_at, working_dir, model);
+    char json[1536];
+    int n;
+    if (sess->parent[0]) {
+        n = snprintf(json, sizeof(json),
+            "{\"uuid\":\"%s\",\"parent\":\"%s\",\"status\":\"running\",\"title\":\"%s\",\"started_at\":\"%s\",\"working_dir\":\"%s\",\"model\":\"%s\"}",
+            sess->uuid, sess->parent, title_buf, sess->started_at, working_dir, model);
+    } else {
+        n = snprintf(json, sizeof(json),
+            "{\"uuid\":\"%s\",\"status\":\"running\",\"title\":\"%s\",\"started_at\":\"%s\",\"working_dir\":\"%s\",\"model\":\"%s\"}",
+            sess->uuid, title_buf, sess->started_at, working_dir, model);
+    }
 
     if (n < 0 || (size_t)n >= sizeof(json)) return -1;
     return write_metadata_file(sess->metadata_path, json);
@@ -190,11 +206,19 @@ int session_write_metadata_close(jb_session *sess, const char *status,
     char ended_at[32];
     iso8601_now(ended_at, sizeof(ended_at));
 
-    char json[2048];
-    int n = snprintf(json, sizeof(json),
-        "{\"uuid\":\"%s\",\"status\":\"%s\",\"title\":\"%s\",\"started_at\":\"%s\",\"ended_at\":\"%s\",\"working_dir\":\"%s\",\"model\":\"%s\",\"tokens_used\":%ld,\"turns\":%d,\"exit_code\":%d}",
-        sess->uuid, status, sess->title, sess->started_at, ended_at,
-        sess->working_dir, sess->model, tokens_used, turns, exit_code);
+    char json[2560];
+    int n;
+    if (sess->parent[0]) {
+        n = snprintf(json, sizeof(json),
+            "{\"uuid\":\"%s\",\"parent\":\"%s\",\"status\":\"%s\",\"title\":\"%s\",\"started_at\":\"%s\",\"ended_at\":\"%s\",\"working_dir\":\"%s\",\"model\":\"%s\",\"tokens_used\":%ld,\"turns\":%d,\"exit_code\":%d}",
+            sess->uuid, sess->parent, status, sess->title, sess->started_at, ended_at,
+            sess->working_dir, sess->model, tokens_used, turns, exit_code);
+    } else {
+        n = snprintf(json, sizeof(json),
+            "{\"uuid\":\"%s\",\"status\":\"%s\",\"title\":\"%s\",\"started_at\":\"%s\",\"ended_at\":\"%s\",\"working_dir\":\"%s\",\"model\":\"%s\",\"tokens_used\":%ld,\"turns\":%d,\"exit_code\":%d}",
+            sess->uuid, status, sess->title, sess->started_at, ended_at,
+            sess->working_dir, sess->model, tokens_used, turns, exit_code);
+    }
 
     if (n < 0 || (size_t)n >= sizeof(json)) return -1;
     return write_metadata_file(sess->metadata_path, json);

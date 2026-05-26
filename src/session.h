@@ -16,6 +16,7 @@ typedef struct {
     char started_at[32];      /* ISO 8601 timestamp */
     char working_dir[4096];   /* cwd at session start */
     char model[128];          /* model name */
+    char parent[JB_UUID_LEN]; /* parent session UUID, empty string if none */
     FILE *log_fp;
     FILE *state_fp;
 } jb_session;
@@ -42,6 +43,9 @@ int session_write_metadata_init(jb_session *sess, const char *prompt,
    Returns 0 on success, -1 on error. */
 int session_write_metadata_close(jb_session *sess, const char *status,
                                  long tokens_used, int turns, int exit_code);
+
+/* Set the parent UUID for this session. Call before session_write_metadata_init. */
+void session_set_parent(jb_session *sess, const char *parent_uuid);
 
 /* Close session files. */
 void session_close(jb_session *sess);
