@@ -10,13 +10,19 @@ A minimal agentic coding loop — single C binary, zero runtime deps except `cur
 
 **Session log**: A file written in real-time from raw SSE events. The primary observability surface — use `tail -f` to watch the agent work.
 
-**Tool**: A function the model can invoke during a turn. jb provides four: `read`, `write`, `edit`, `bash`.
+**Tool**: A function the model can invoke during a turn. jb provides five: `read`, `write`, `edit`, `bash`, `jb`.
 
 **Skill**: A markdown file that becomes part of the system prompt. Markdown-as-program.
 
 **Provider**: Any OpenAI Chat Completions-compatible API endpoint. Cloud (OpenAI, DeepSeek, etc.) or local (Ollama, llama.cpp, etc.).
 
-_Avoid_: Plugin, extension, module (jb has none of these)
+**Session metadata**: A `metadata.json` file written into each session directory at two points: (1) at session init with `status: "running"`, title (truncated prompt prefix), start time, working directory, model, and optionally `parent` UUID; (2) at session close with final status, end time, tokens used, turn count, exit code. The `parent` field is present only when the session was spawned by another session (via `--parent` flag). Enables viewers to list and search sessions without parsing `state.jsonl`. See [ADR-0004](docs/adr/0004-session-metadata.md).
+
+**Session lister**: A sidecar shell script (`contrib/jb-list`) that scans all session directories and outputs their `metadata.json` as JSONL (one object per line). Composable via pipes and jq. jb knows nothing about it.
+
+**Session viewer**: A sidecar shell script (`contrib/jb-view`) that reads a session's `metadata.json` for its header and renders `state.jsonl` into a readable formatted log. Works on live (tail -f) or completed sessions. jb knows nothing about it.
+
+_Avoid_: Plugin, extension, module, GUI, TUI (jb has none of these; viewers are formatters, not interactive UIs)
 
 ## Streams
 
@@ -24,6 +30,7 @@ _Avoid_: Plugin, extension, module (jb has none of these)
 - **stderr** — silent always (Rule of Silence). All diagnostics go to the session log.
 - **Session log** — raw SSE events written in real-time to `$XDG_CACHE_HOME/jb/sessions/<uuid>/log.jsonl`. Full transcript. `tail -f` is the UI. A future viewer can parse and present the events.
 - **Session state** — append-only JSONL at `$XDG_CACHE_HOME/jb/sessions/<uuid>/state.jsonl` — one JSON object per line, each representing a message. The full conversation. Rebuilt on startup by reading all lines.
+- **Session metadata** — a `metadata.json` at `$XDG_CACHE_HOME/jb/sessions/<uuid>/metadata.json` written at session init (status: running) and overwritten at close (final status, token/turn counts).
 - **Temp files** — bash output exceeding `max_output_bytes` saved to `$TMPDIR/jb-<uuid>-bash-<N>.out` (respects `$TMPDIR`, defaults to `/tmp`). Path included in tool result.
 - **Loop termination**: configurable `max_tokens` budget (total tokens across all turns). When exhausted, prints partial results and exits code 2.
 - **Bash timeout**: optional parameter on the bash tool. The model decides the timeout per command. No cap. If the model omits it, the command runs until it finishes or the user kills the process.
@@ -38,11 +45,12 @@ _Avoid_: Plugin, extension, module (jb has none of these)
 - Each **Turn** may produce zero or more **Tool** calls, which are executed and fed back
 - A **Skill** is injected into the system prompt (index only), the model reads the full SKILL.md via `read` when needed
 - A **Provider** serves all **Sessions** — any chat/completions endpoint works
-- A **Sub-agent** is a child `jb` process spawned via `bash`. It has its own session, reads the same working directory, returns its final answer via stdout.
+- A **Sub-agent** is a child `jb` process spawned via the `jb` tool. It has its own session, reads the same working directory, returns its final answer via stdout. The parent UUID is injected automatically — the model does not see it.
+- The **Session tree** is an observability artifact — a directed tree of sessions linked by `parent` pointers in metadata. Roots are sessions with no parent. Reconstructed from metadata by `jb-list` and jq. No runtime coordination.
 
 ## System prompt
 
-Hardcoded base prompt (~20 lines): who jb is, what the four tools do, be concise, execute, mention sub-agent capability, current date (`YYYY-MM-DD`), current working directory. Sent as `role: "system"` message. Then appended:
+Hardcoded base prompt (~20 lines): who jb is, what the five tools do, be concise, execute, current date (`YYYY-MM-DD`), current working directory. Sent as `role: "system"` message. Then appended:
 - AGENTS.md content (walked from cwd up)
 - Skills index (XML-style `<available_skills>` block with name, description, full file path per skill)
 
@@ -66,7 +74,8 @@ Hardcoded base prompt (~20 lines): who jb is, what the four tools do, be concise
     {"type": "function", "function": {"name": "read", "description": "...", "parameters": {...}}},
     {"type": "function", "function": {"name": "write", "description": "...", "parameters": {...}}},
     {"type": "function", "function": {"name": "edit", "description": "...", "parameters": {...}}},
-    {"type": "function", "function": {"name": "bash", "description": "...", "parameters": {...}}}
+    {"type": "function", "function": {"name": "bash", "description": "...", "parameters": {...}}},
+    {"type": "function", "function": {"name": "jb", "description": "...", "parameters": {...}}}
   ],
   "stream": true,
   "stream_options": {"include_usage": true}
@@ -96,8 +105,8 @@ The full `messages` array is sent every turn. `tools` is sent every turn. The AP
 
 ## Example dialogue
 
-> **Dev:** "When jb runs `bash` and the command is `jb`, what happens?"
-> **Domain expert:** "A new jb process starts — it's just a subprocess. The parent jb sees the child's stdout as the tool result. The child jb has its own session, its own provider call."
+> **Dev:** "When jb uses the `jb` tool, what happens?"
+> **Domain expert:** "A new jb process starts as a subprocess. The parent's UUID is passed via `--parent` so the child records the lineage in its metadata. The parent sees the child's stdout as the tool result. The child has its own session, its own provider call."
 
 > **Dev:** "Does jb keep the full conversation in memory?"
 > **Domain expert:** "Yes — the full message array is stored in `state.jsonl` on disk. Every turn, jb reads it, appends the new messages, and sends the whole array to the API. The API is stateless."
@@ -138,10 +147,11 @@ cat spec.md | jb
 **Flags**:
 - `jb --version` — print version string to stdout, exit 0
 - `jb --help` — print usage hint pointing to `man jb`, exit 0
+- `jb --parent <uuid>` — declare the UUID of the parent session. Stored in `metadata.json` as the `parent` field. Not validated — the UUID is a pointer, not a guarantee. Invisible to the model when used via the `jb` tool (auto-injected).
 - `jb` (no flags, stdin is a tty) — print usage hint to stderr, exit 3
 - `jb` (no flags, stdin has data) — normal operation
 
-These are the only flags. No other arguments are recognized. Any other token on the command line is silently ignored (the prompt always comes from stdin).
+No other arguments are recognized. Any other token on the command line is silently ignored (the prompt always comes from stdin).
 
 **Version**: Hardcoded as `#define JB_VERSION "x.y"` in a header. Bumped manually on release. Printed by `jb --version` as `jb x.y`.
 
