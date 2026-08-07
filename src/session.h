@@ -4,6 +4,7 @@
 
 #include <stdio.h>
 #include "config.h"
+#include "cJSON.h"
 
 #define JB_UUID_LEN 37  /* 36 chars + null */
 
@@ -18,7 +19,8 @@ typedef struct {
     char working_dir[4096];   /* cwd at session start */
     char model[128];          /* model name */
     jb_config cfg_snapshot;    /* config snapshot for metadata close */
-    char parent[JB_UUID_LEN]; /* parent session UUID, empty string if none */
+    char parent[JB_UUID_LEN]; /* STRONG link: conversation parent (--fork), empty if none */
+    char spawned_from[JB_UUID_LEN]; /* WEAK link: provenance parent (--seed / $JB_SESSION), empty if none */
     FILE *log_fp;
     FILE *state_fp;
 } jb_session;
@@ -46,8 +48,18 @@ int session_write_metadata_init(jb_session *sess, const char *prompt,
 int session_write_metadata_close(jb_session *sess, const char *status,
                                  long tokens_used, int turns, int exit_code);
 
-/* Set the parent UUID for this session. Call before session_write_metadata_init. */
+/* Set the STRONG parent UUID (conversation lineage, via --fork).
+   Call before session_write_metadata_init. */
 void session_set_parent(jb_session *sess, const char *parent_uuid);
+
+/* Set the WEAK provenance UUID (spawn lineage, via --seed or $JB_SESSION).
+   Call before session_write_metadata_init. */
+void session_set_spawned_from(jb_session *sess, const char *source_uuid);
+
+/* Load another session's state.jsonl into a cJSON messages array, trimming
+   the dangling tail (everything after the last assistant message that has no
+   tool_calls). Returns 0 on success, -1 if the session is missing/corrupt. */
+int session_load_state(cJSON *messages, const char *source_uuid);
 
 /* Close session files. */
 void session_close(jb_session *sess);

@@ -137,11 +137,11 @@ else
     fail "child jb inherits --config: parent exits 0" "exit $_rc_child"
 fi
 
-# Find the child session (has parent field in metadata)
+# Find the child session (has spawned_from field in metadata — weak link)
 _found_child=0
 for _d in "$_cache_dir2"/*/; do
     [ -f "${_d}metadata.json" ] || continue
-    _has_p=$(jq 'has("parent")' "${_d}metadata.json" 2>/dev/null)
+    _has_p=$(jq 'has("spawned_from")' "${_d}metadata.json" 2>/dev/null)
     if [ "$_has_p" = "true" ]; then
         _c_tokens=$(jq -r '.config.max_tokens // empty' "${_d}metadata.json" 2>/dev/null)
         if [ "$_c_tokens" = "$_unique_max_tokens" ]; then

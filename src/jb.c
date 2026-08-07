@@ -86,8 +86,9 @@ static int api_chat_with_retry(const jb_config *cfg, cJSON *messages, cJSON *too
 
 int main(int argc, char **argv)
 {
-    /* Flag parsing — --version, --help, --parent, --config */
-    char *parent_uuid = NULL;
+    /* Flag parsing — --version, --help, --seed/--parent, --fork, --config */
+    char *seed_uuid = NULL;   /* WEAK link: provenance (--seed, or legacy --parent) */
+    char *fork_uuid = NULL;   /* STRONG link: conversation parent (--fork) */
     char *config_path = NULL;
     int config_count = 0;
     if (argc > 1) {
@@ -100,8 +101,12 @@ int main(int argc, char **argv)
                 printf("jb — a minimal agentic coding loop. See jb(1).\n");
                 return 0;
             }
-            if (strcmp(argv[i], "--parent") == 0 && i + 1 < argc) {
-                parent_uuid = argv[++i];
+            if ((strcmp(argv[i], "--seed") == 0 || strcmp(argv[i], "--parent") == 0)
+                && i + 1 < argc) {
+                seed_uuid = argv[++i];
+            }
+            if (strcmp(argv[i], "--fork") == 0 && i + 1 < argc) {
+                fork_uuid = argv[++i];
             }
             if (strcmp(argv[i], "--config") == 0) {
                 config_count++;
@@ -140,10 +145,21 @@ int main(int argc, char **argv)
     }
     g_session_active = 1;
 
-    /* Set parent UUID if provided */
-    if (parent_uuid) {
-        session_set_parent(&g_session, parent_uuid);
+    /* Set lineage: --fork sets the STRONG link (conversation parent);
+       --seed sets the WEAK link (provenance); else $JB_SESSION env.
+       Then export our own identity so children inherit provenance. */
+    if (fork_uuid) {
+        session_set_parent(&g_session, fork_uuid);
     }
+    if (seed_uuid) {
+        session_set_spawned_from(&g_session, seed_uuid);
+    } else {
+        const char *jb_session = getenv("JB_SESSION");
+        if (jb_session && jb_session[0]) {
+            session_set_spawned_from(&g_session, jb_session);
+        }
+    }
+    setenv("JB_SESSION", g_session.uuid, 1);
 
     /* Install signal handlers */
     signal(SIGINT, handle_signal);
@@ -183,29 +199,49 @@ int main(int argc, char **argv)
     /* Write initial metadata (status: running) — derives title from prompt */
     session_write_metadata_init(sess, user_prompt, cwd, &cfg);
 
-    /* Build system prompt */
-    char *sys_prompt = prompt_build();
-
     /* Build initial messages array */
     cJSON *messages = cJSON_CreateArray();
 
-    /* System message */
-    cJSON *sys_msg = cJSON_CreateObject();
-    cJSON_AddStringToObject(sys_msg, "role", "system");
-    cJSON_AddStringToObject(sys_msg, "content", sys_prompt);
-    cJSON_AddItemToArray(messages, sys_msg);
+    if (fork_uuid) {
+        /* --fork: load the source session's full conversation (system prompt
+           included, stale by design — rebuilding would break the tree). */
+        if (session_load_state(messages, fork_uuid) != 0) {
+            fprintf(stderr, "jb: --fork: cannot load session %s\n", fork_uuid);
+            cJSON_Delete(messages);
+            session_close(sess);
+            free(user_prompt);
+            return 3;
+        }
+        /* Replay history into our own state file (self-contained record) */
+        for (cJSON *m = messages->child; m; m = m->next) {
+            char *s = cJSON_PrintUnformatted(m);
+            if (s) {
+                session_append_state(sess, s);
+                free(s);
+            }
+        }
+    } else {
+        /* Build system prompt */
+        char *sys_prompt = prompt_build();
 
-    /* Append system message to state */
-    {
-        cJSON *state_msg = cJSON_CreateObject();
-        cJSON_AddStringToObject(state_msg, "role", "system");
-        cJSON_AddStringToObject(state_msg, "content", sys_prompt);
-        char *s = cJSON_PrintUnformatted(state_msg);
-        session_append_state(sess, s);
-        free(s);
-        cJSON_Delete(state_msg);
+        /* System message */
+        cJSON *sys_msg = cJSON_CreateObject();
+        cJSON_AddStringToObject(sys_msg, "role", "system");
+        cJSON_AddStringToObject(sys_msg, "content", sys_prompt);
+        cJSON_AddItemToArray(messages, sys_msg);
+
+        /* Append system message to state */
+        {
+            cJSON *state_msg = cJSON_CreateObject();
+            cJSON_AddStringToObject(state_msg, "role", "system");
+            cJSON_AddStringToObject(state_msg, "content", sys_prompt);
+            char *s = cJSON_PrintUnformatted(state_msg);
+            session_append_state(sess, s);
+            free(s);
+            cJSON_Delete(state_msg);
+        }
+        free(sys_prompt);
     }
-    free(sys_prompt);
 
     /* User message */
     cJSON *user_msg = cJSON_CreateObject();

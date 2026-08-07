@@ -56,11 +56,16 @@ if [ -f "$META_FILE" ]; then
     [ -n "$_model" ] && _header_parts="$_header_parts  $_model"
     [ -n "$_turns" ] && [ "$_turns" != "null" ] && _header_parts="$_header_parts  ${_turns} turns"
 
-    # Show parent if present
+    # Show strong link (parent) and weak link (spawned_from) if present
     _parent=$(jq -r '.parent // empty' "$META_FILE" 2>/dev/null)
     if [ -n "$_parent" ]; then
         _short_parent=$(printf '%s' "$_parent" | cut -c1-8)
         _header_parts="$_header_parts  parent:$_short_parent"
+    fi
+    _spawned=$(jq -r '.spawned_from // empty' "$META_FILE" 2>/dev/null)
+    if [ -n "$_spawned" ]; then
+        _short_spawned=$(printf '%s' "$_spawned" | cut -c1-8)
+        _header_parts="$_header_parts  from:$_short_spawned"
     fi
 
     printf "${D}session %s${R}\n" "$_header_parts"

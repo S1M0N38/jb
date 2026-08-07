@@ -16,6 +16,13 @@ static const char *xdg_cache_home(void)
     return buf;
 }
 
+/* Resolve the path of another session's file (e.g. state.jsonl). */
+static int session_file_path(const char *uuid, const char *file, char *out, size_t outlen)
+{
+    snprintf(out, outlen, "%s/jb/sessions/%s/%s", xdg_cache_home(), uuid, file);
+    return 0;
+}
+
 static int generate_uuid(char *out, size_t outlen)
 {
     /* UUID v4 from /dev/urandom */
@@ -122,6 +129,57 @@ void session_set_parent(jb_session *sess, const char *parent_uuid)
     }
 }
 
+void session_set_spawned_from(jb_session *sess, const char *source_uuid)
+{
+    if (source_uuid && source_uuid[0]) {
+        strncpy(sess->spawned_from, source_uuid, JB_UUID_LEN - 1);
+        sess->spawned_from[JB_UUID_LEN - 1] = '\0';
+    }
+}
+
+int session_load_state(cJSON *messages, const char *source_uuid)
+{
+    char path[4096];
+    session_file_path(source_uuid, "state.jsonl", path, sizeof(path));
+
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+
+    char line[65536];
+    cJSON *last_good = NULL;  /* last assistant message without tool_calls */
+    int n = 0;
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        if (!line[0]) continue;
+        cJSON *obj = cJSON_Parse(line);
+        if (!obj) continue;
+        cJSON_AddItemToArray(messages, obj);
+        n++;
+        cJSON *role = cJSON_GetObjectItemCaseSensitive(obj, "role");
+        cJSON *tc   = cJSON_GetObjectItemCaseSensitive(obj, "tool_calls");
+        if (role && cJSON_IsString(role) &&
+            strcmp(role->valuestring, "assistant") == 0 && !tc) {
+            last_good = obj;
+        }
+    }
+    fclose(f);
+
+    if (n == 0) return -1;
+
+    /* Trim dangling tail: drop everything after last_good (unpaired tool
+       calls or tool results from an interrupted source session). */
+    if (last_good) {
+        int keep = 0, i = 0;
+        for (cJSON *c = messages->child; c; c = c->next, i++) {
+            if (c == last_good) keep = i;
+        }
+        while (cJSON_GetArraySize(messages) > keep + 1) {
+            cJSON_DeleteItemFromArray(messages, keep + 1);
+        }
+    }
+    return 0;
+}
+
 void session_close(jb_session *sess)
 {
     if (sess->log_fp) { fclose(sess->log_fp); sess->log_fp = NULL; }
@@ -187,10 +245,20 @@ int session_write_metadata_init(jb_session *sess, const char *prompt,
     /* Build JSON manually — config object replaces top-level model */
     char json[2048];
     int n;
-    if (sess->parent[0]) {
+    if (sess->parent[0] && sess->spawned_from[0]) {
+        n = snprintf(json, sizeof(json),
+            "{\"uuid\":\"%s\",\"parent\":\"%s\",\"spawned_from\":\"%s\",\"status\":\"running\",\"title\":\"%s\",\"started_at\":\"%s\",\"working_dir\":\"%s\",\"config\":{\"api_url\":\"%s\",\"model\":\"%s\",\"max_tokens\":%ld,\"max_output_lines\":%ld,\"max_output_bytes\":%ld}}",
+            sess->uuid, sess->parent, sess->spawned_from, title_buf, sess->started_at, working_dir,
+            cfg->api_url, cfg->model, cfg->max_tokens, cfg->max_output_lines, cfg->max_output_bytes);
+    } else if (sess->parent[0]) {
         n = snprintf(json, sizeof(json),
             "{\"uuid\":\"%s\",\"parent\":\"%s\",\"status\":\"running\",\"title\":\"%s\",\"started_at\":\"%s\",\"working_dir\":\"%s\",\"config\":{\"api_url\":\"%s\",\"model\":\"%s\",\"max_tokens\":%ld,\"max_output_lines\":%ld,\"max_output_bytes\":%ld}}",
             sess->uuid, sess->parent, title_buf, sess->started_at, working_dir,
+            cfg->api_url, cfg->model, cfg->max_tokens, cfg->max_output_lines, cfg->max_output_bytes);
+    } else if (sess->spawned_from[0]) {
+        n = snprintf(json, sizeof(json),
+            "{\"uuid\":\"%s\",\"spawned_from\":\"%s\",\"status\":\"running\",\"title\":\"%s\",\"started_at\":\"%s\",\"working_dir\":\"%s\",\"config\":{\"api_url\":\"%s\",\"model\":\"%s\",\"max_tokens\":%ld,\"max_output_lines\":%ld,\"max_output_bytes\":%ld}}",
+            sess->uuid, sess->spawned_from, title_buf, sess->started_at, working_dir,
             cfg->api_url, cfg->model, cfg->max_tokens, cfg->max_output_lines, cfg->max_output_bytes);
     } else {
         n = snprintf(json, sizeof(json),
@@ -211,10 +279,28 @@ int session_write_metadata_close(jb_session *sess, const char *status,
 
     char json[2560];
     int n;
-    if (sess->parent[0]) {
+    if (sess->parent[0] && sess->spawned_from[0]) {
+        n = snprintf(json, sizeof(json),
+            "{\"uuid\":\"%s\",\"parent\":\"%s\",\"spawned_from\":\"%s\",\"status\":\"%s\",\"title\":\"%s\",\"started_at\":\"%s\",\"ended_at\":\"%s\",\"working_dir\":\"%s\",\"config\":{\"api_url\":\"%s\",\"model\":\"%s\",\"max_tokens\":%ld,\"max_output_lines\":%ld,\"max_output_bytes\":%ld},\"tokens_used\":%ld,\"turns\":%d,\"exit_code\":%d}",
+            sess->uuid, sess->parent, sess->spawned_from, status, sess->title, sess->started_at, ended_at,
+            sess->working_dir,
+            sess->cfg_snapshot.api_url, sess->cfg_snapshot.model,
+            sess->cfg_snapshot.max_tokens, sess->cfg_snapshot.max_output_lines,
+            sess->cfg_snapshot.max_output_bytes,
+            tokens_used, turns, exit_code);
+    } else if (sess->parent[0]) {
         n = snprintf(json, sizeof(json),
             "{\"uuid\":\"%s\",\"parent\":\"%s\",\"status\":\"%s\",\"title\":\"%s\",\"started_at\":\"%s\",\"ended_at\":\"%s\",\"working_dir\":\"%s\",\"config\":{\"api_url\":\"%s\",\"model\":\"%s\",\"max_tokens\":%ld,\"max_output_lines\":%ld,\"max_output_bytes\":%ld},\"tokens_used\":%ld,\"turns\":%d,\"exit_code\":%d}",
             sess->uuid, sess->parent, status, sess->title, sess->started_at, ended_at,
+            sess->working_dir,
+            sess->cfg_snapshot.api_url, sess->cfg_snapshot.model,
+            sess->cfg_snapshot.max_tokens, sess->cfg_snapshot.max_output_lines,
+            sess->cfg_snapshot.max_output_bytes,
+            tokens_used, turns, exit_code);
+    } else if (sess->spawned_from[0]) {
+        n = snprintf(json, sizeof(json),
+            "{\"uuid\":\"%s\",\"spawned_from\":\"%s\",\"status\":\"%s\",\"title\":\"%s\",\"started_at\":\"%s\",\"ended_at\":\"%s\",\"working_dir\":\"%s\",\"config\":{\"api_url\":\"%s\",\"model\":\"%s\",\"max_tokens\":%ld,\"max_output_lines\":%ld,\"max_output_bytes\":%ld},\"tokens_used\":%ld,\"turns\":%d,\"exit_code\":%d}",
+            sess->uuid, sess->spawned_from, status, sess->title, sess->started_at, ended_at,
             sess->working_dir,
             sess->cfg_snapshot.api_url, sess->cfg_snapshot.model,
             sess->cfg_snapshot.max_tokens, sess->cfg_snapshot.max_output_lines,
