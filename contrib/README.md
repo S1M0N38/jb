@@ -49,7 +49,13 @@ Example output line:
   "started_at": "2026-05-25T19:01:53Z",
   "ended_at": "2026-05-25T19:02:04Z",
   "working_dir": "/Users/simo/Developer/jb",
-  "model": "glm-5.1",
+  "config": {
+    "api_url": "https://opencode.ai/zen/go/v1",
+    "model": "deepseek-v4-flash",
+    "max_tokens": 500000,
+    "max_output_lines": 2000,
+    "max_output_bytes": 51200
+  },
   "tokens_used": 1413,
   "turns": 2,
   "exit_code": 0
@@ -111,7 +117,7 @@ jb-list | jq -r 'select(.status=="completed") | .uuid' | tail -1 | xargs jb-view
 When `metadata.json` is present, the session header shows:
 
 ```
-session fd39d269  completed  glm-5.1  2 turns
+session fd39d269  completed  deepseek-v4-flash  2 turns
 > Create a file called /tmp/e2e.txt with content...
 ```
 

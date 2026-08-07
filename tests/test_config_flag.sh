@@ -104,17 +104,26 @@ rm -rf "$_mkdir"
 
 # Child jb process inherits --config from parent
 # Run parent with --config that uses the jb tool; verify child also used same config
+# Derive the child config from the user's real config (provider-agnostic), overriding max_tokens
 _child_cfg=$(mktemp)
 _unique_max_tokens="77777"
-cat > "$_child_cfg" <<'TESTCFG'
+_real_cfg="${XDG_CONFIG_HOME:-$HOME/.config}/jb/config.json"
+if [ -f "$_real_cfg" ]; then
+    jq --arg t "$_unique_max_tokens" '.max_tokens = ($t|tonumber)' "$_real_cfg" > "$_child_cfg" 2>/dev/null
+fi
+# Fallback if no real config: a minimal provider-neutral config (will fail API, but child
+# inheritance is still verifiable via metadata if the parent errors out differently)
+if [ ! -s "$_child_cfg" ]; then
+    cat > "$_child_cfg" <<'TESTCFG'
 {
-  "api_url": "https://api.z.ai/api/coding/paas/v4",
-  "model": "glm-5.1",
+  "api_url": "https://api.example.com/v1",
+  "model": "test-model",
   "max_tokens": 77777,
   "max_output_lines": 2000,
   "max_output_bytes": 51200
 }
 TESTCFG
+fi
 # Clean sessions for clean child detection
 _cache_dir2="${XDG_CACHE_HOME:-$HOME/.cache}/jb/sessions"
 rm -rf "${_cache_dir2:?}"/*/
