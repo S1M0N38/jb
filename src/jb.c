@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include "cJSON.h"
 #include "config.h"
@@ -50,7 +51,112 @@ static char *read_stdin(void)
     return buf;
 }
 
+/* ---- Command implementations ---- */
+
+/* cmd_help — the command reference; bare jb = jb help */
+static void cmd_help(const char *verb)
+{
+    if (verb) {
+        printf("usage: jb %s ...\n", verb);
+        return;
+    }
+    printf("usage: jb <command> [<args>]\n");
+    printf("\n");
+    printf("commands:\n");
+    printf("  init       create an empty jb repository (.jb/)\n");
+    printf("  run        run the agent on a prompt from stdin\n");
+    printf("  commit     finalize a completed session\n");
+    printf("  status     show the current session and repo summary\n");
+    printf("  log        list sessions (flat or --graph)\n");
+    printf("  show       pretty-print session metadata\n");
+    printf("  ps         list children of the current session\n");
+    printf("  wait       wait for a session to finish\n");
+    printf("  path       print a session's directory\n");
+    printf("  export     export a session (HTML viewer / JSONL)\n");
+    printf("  config     get/set configuration\n");
+    printf("  help       show this help\n");
+    printf("\n");
+    printf("global flags:\n");
+    printf("  -C DIR            resolve the repository from DIR\n");
+    printf("  -c KEY=VALUE      config override (repeatable)\n");
+    printf("  --config PATH     load config from PATH\n");
+    printf("  --version         print version\n");
+    printf("  --help            show this help\n");
+    printf("\n");
+    printf("exit codes: 0 success · 1 error/not found · 2 usage\n");
+}
+
+static int path_is_dir(const char *path)
+{
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static int path_is_file(const char *path)
+{
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+/* mkdir -p for a single path (all intermediate components) */
+static int mkdirs(const char *path)
+{
+    char tmp[4096];
+    strncpy(tmp, path, sizeof(tmp) - 1);
+    tmp[sizeof(tmp) - 1] = '\0';
+
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(tmp, 0755);
+            *p = '/';
+        }
+    }
+    mkdir(tmp, 0755);
+    return 0;
+}
+
+/* cmd_init — create .jb/ with sessions/ and an empty local config */
+static int cmd_init(void)
+{
+    char cwd[4096];
+    if (!getcwd(cwd, sizeof(cwd))) {
+        fprintf(stderr, "jb: cannot determine working directory\n");
+        return 1;
+    }
+
+    char jbdir[4096];
+    snprintf(jbdir, sizeof(jbdir), "%s/.jb", cwd);
+    int existed = path_is_dir(jbdir);
+
+    char sessions_dir[4096];
+    snprintf(sessions_dir, sizeof(sessions_dir), "%s/.jb/sessions", cwd);
+    mkdirs(sessions_dir);
+
+    /* Local config: only if absent — never clobber an existing one */
+    char cfg_path[4096];
+    snprintf(cfg_path, sizeof(cfg_path), "%s/.jb/config.json", cwd);
+    if (!path_is_file(cfg_path)) {
+        FILE *f = fopen(cfg_path, "w");
+        if (f) {
+            fprintf(f, "{}\n");
+            fclose(f);
+        }
+    }
+
+    if (existed) {
+        fprintf(stderr, "jb: reinitialized existing jb repository in %s\n", cwd);
+    } else {
+        fprintf(stderr, "jb: initialized empty jb repository in %s\n", cwd);
+    }
+    return 0;
+}
+
 /* Retry wrapper for api_chat — retries on transient errors */
+static int api_chat_with_retry(const jb_config *cfg, cJSON *messages, cJSON *tools,
+                               api_response *resp, jb_session *sess);
+
+static int cmd_run(const char *config_path, const char *argv0);
 static int api_chat_with_retry(const jb_config *cfg, cJSON *messages, cJSON *tools,
                                api_response *resp, jb_session *sess)
 {
@@ -86,54 +192,89 @@ static int api_chat_with_retry(const jb_config *cfg, cJSON *messages, cJSON *too
 
 int main(int argc, char **argv)
 {
-    /* Flag parsing — --version, --help, --seed/--parent, --fork, --config */
-    char *seed_uuid = NULL;   /* WEAK link: provenance (--seed, or legacy --parent) */
-    char *fork_uuid = NULL;   /* STRONG link: conversation parent (--fork) */
-    char *config_path = NULL;
+    /* Global flags before the verb (git-style): -C DIR, --config PATH,
+       --version, --help. Then dispatch on the first non-flag token. */
+    const char *dir_arg = NULL;   /* -C DIR */
+    const char *config_path = NULL;
     int config_count = 0;
-    if (argc > 1) {
-        for (int i = 1; i < argc; i++) {
-            if (strcmp(argv[i], "--version") == 0) {
-                printf("jb %s\n", JB_VERSION);
-                return 0;
+    int i = 1;
+
+    for (; i < argc; i++) {
+        if (strcmp(argv[i], "--version") == 0) {
+            printf("jb %s\n", JB_VERSION);
+            return 0;
+        }
+        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            cmd_help(NULL);
+            return 0;
+        }
+        if (strcmp(argv[i], "-C") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "jb: option '-C' requires a value\n");
+                return 2;
             }
-            if (strcmp(argv[i], "--help") == 0) {
-                printf("jb — a minimal agentic coding loop. See jb(1).\n");
-                return 0;
+            dir_arg = argv[++i];
+            continue;
+        }
+        if (strcmp(argv[i], "--config") == 0) {
+            config_count++;
+            if (config_count > 1) {
+                fprintf(stderr, "jb: --config specified multiple times\n");
+                return 2;
             }
-            if ((strcmp(argv[i], "--seed") == 0 || strcmp(argv[i], "--parent") == 0)
-                && i + 1 < argc) {
-                seed_uuid = argv[++i];
+            if (i + 1 >= argc) {
+                fprintf(stderr, "jb: --config requires a path\n");
+                return 2;
             }
-            if (strcmp(argv[i], "--fork") == 0 && i + 1 < argc) {
-                fork_uuid = argv[++i];
-            }
-            if (strcmp(argv[i], "--config") == 0) {
-                config_count++;
-                if (config_count > 1) {
-                    fprintf(stderr, "jb: --config specified multiple times\n");
-                    return 3;
-                }
-                if (i + 1 >= argc) {
-                    fprintf(stderr, "jb: --config requires a path\n");
-                    return 3;
-                }
-                config_path = argv[++i];
-            }
+            config_path = argv[++i];
+            continue;
+        }
+        if (argv[i][0] == '-') {
+            fprintf(stderr, "jb: unknown option '%s' (see 'jb help')\n", argv[i]);
+            return 2;
+        }
+        break;  /* first non-flag token = the verb */
+    }
+
+    /* -C DIR: run as if started in DIR (git -C analog) */
+    if (dir_arg) {
+        if (chdir(dir_arg) != 0) {
+            fprintf(stderr, "jb: fatal: cannot change to '%s'\n", dir_arg);
+            return 1;
         }
     }
 
-    /* No flags, stdin is a tty — usage hint */
-    if (argc == 1 && isatty(STDIN_FILENO)) {
-        fprintf(stderr, "jb: usage: prompt | jb  (see jb(1))\n");
-        return 3;
+    /* Bare jb = jb help */
+    if (i >= argc) {
+        cmd_help(NULL);
+        return 0;
     }
 
+    const char *verb = argv[i];
+    const char *verb_arg = (i + 1 < argc) ? argv[i + 1] : NULL;
+
+    if (strcmp(verb, "help") == 0) {
+        cmd_help(verb_arg);
+        return 0;
+    }
+    if (strcmp(verb, "init") == 0) {
+        return cmd_init();
+    }
+    if (strcmp(verb, "run") == 0) {
+        return cmd_run(config_path, argv[0]);
+    }
+
+    fprintf(stderr, "jb: unknown command '%s' (see 'jb help')\n", verb);
+    return 2;
+}
+
+static int cmd_run(const char *config_path, const char *argv0)
+{
     jb_config cfg;
 
-    /* Load config — exits with code 3 on failure */
+    /* Load config — failure is an error (exit 1) */
     if (config_load(&cfg, config_path) != 0) {
-        return 3;
+        return 1;
     }
 
     /* Pass resolved config path to tools for child jb inheritance */
@@ -141,24 +282,11 @@ int main(int argc, char **argv)
 
     /* Initialize session */
     if (session_init(&g_session) != 0) {
-        return 3;
+        return 1;
     }
     g_session_active = 1;
 
-    /* Set lineage: --fork sets the STRONG link (conversation parent);
-       --seed sets the WEAK link (provenance); else $JB_SESSION env.
-       Then export our own identity so children inherit provenance. */
-    if (fork_uuid) {
-        session_set_parent(&g_session, fork_uuid);
-    }
-    if (seed_uuid) {
-        session_set_spawned_from(&g_session, seed_uuid);
-    } else {
-        const char *jb_session = getenv("JB_SESSION");
-        if (jb_session && jb_session[0]) {
-            session_set_spawned_from(&g_session, jb_session);
-        }
-    }
+    /* Export our own identity so children inherit provenance */
     setenv("JB_SESSION", g_session.uuid, 1);
 
     /* Install signal handlers */
@@ -173,7 +301,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "jb: no prompt on stdin\n");
         session_close(sess);
         free(user_prompt);
-        return 3;
+        return 2;
     }
 
     /* Get working directory */
@@ -182,18 +310,18 @@ int main(int argc, char **argv)
 
     /* Resolve jb binary path for the jb tool */
     char jb_abs[4096];
-    if (argv[0][0] == '/') {
-        strncpy(jb_abs, argv[0], sizeof(jb_abs) - 1);
+    if (argv0[0] == '/') {
+        strncpy(jb_abs, argv0, sizeof(jb_abs) - 1);
     } else {
         /* Resolve relative to cwd */
-        snprintf(jb_abs, sizeof(jb_abs), "%s/%s", cwd, argv[0]);
+        snprintf(jb_abs, sizeof(jb_abs), "%s/%s", cwd, argv0);
     }
     /* Canonicalize (remove . and ..) */
     char jb_resolved[4096];
     if (realpath(jb_abs, jb_resolved)) {
         tools_set_jb_path(jb_resolved);
     } else {
-        tools_set_jb_path(argv[0]);  /* fallback */
+        tools_set_jb_path(argv0);  /* fallback */
     }
 
     /* Write initial metadata (status: running) — derives title from prompt */
@@ -202,46 +330,15 @@ int main(int argc, char **argv)
     /* Build initial messages array */
     cJSON *messages = cJSON_CreateArray();
 
-    if (fork_uuid) {
-        /* --fork: load the source session's full conversation (system prompt
-           included, stale by design — rebuilding would break the tree). */
-        if (session_load_state(messages, fork_uuid) != 0) {
-            fprintf(stderr, "jb: --fork: cannot load session %s\n", fork_uuid);
-            cJSON_Delete(messages);
-            session_close(sess);
-            free(user_prompt);
-            return 3;
-        }
-        /* Replay history into our own state file (self-contained record) */
-        for (cJSON *m = messages->child; m; m = m->next) {
-            char *s = cJSON_PrintUnformatted(m);
-            if (s) {
-                session_append_state(sess, s);
-                free(s);
-            }
-        }
-    } else {
-        /* Build system prompt */
-        char *sys_prompt = prompt_build();
+    /* Build system prompt */
+    char *sys_prompt = prompt_build();
 
-        /* System message */
-        cJSON *sys_msg = cJSON_CreateObject();
-        cJSON_AddStringToObject(sys_msg, "role", "system");
-        cJSON_AddStringToObject(sys_msg, "content", sys_prompt);
-        cJSON_AddItemToArray(messages, sys_msg);
-
-        /* Append system message to state */
-        {
-            cJSON *state_msg = cJSON_CreateObject();
-            cJSON_AddStringToObject(state_msg, "role", "system");
-            cJSON_AddStringToObject(state_msg, "content", sys_prompt);
-            char *s = cJSON_PrintUnformatted(state_msg);
-            session_append_state(sess, s);
-            free(s);
-            cJSON_Delete(state_msg);
-        }
-        free(sys_prompt);
-    }
+    /* System message */
+    cJSON *sys_msg = cJSON_CreateObject();
+    cJSON_AddStringToObject(sys_msg, "role", "system");
+    cJSON_AddStringToObject(sys_msg, "content", sys_prompt);
+    cJSON_AddItemToArray(messages, sys_msg);
+    free(sys_prompt);
 
     /* User message */
     cJSON *user_msg = cJSON_CreateObject();
