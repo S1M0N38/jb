@@ -653,6 +653,9 @@ int main(int argc, char **argv)
     if (strcmp(verb, "path") == 0) {
         return cmd_path(verb_arg);
     }
+    if (strcmp(verb, "show") == 0) {
+        return cmd_show(verb_arg);
+    }
 
     fprintf(stderr, "jb: unknown command '%s' (see 'jb help')\n", verb);
     return 2;

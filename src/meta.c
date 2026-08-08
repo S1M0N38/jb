@@ -99,3 +99,81 @@ int cmd_path(const char *id_arg)
     printf("%s/.jb/sessions/%s\n", repo_root, uuid);
     return 0;
 }
+
+/* ---- shared metadata reading ---- */
+
+static char *read_file(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *buf = malloc((size_t)len + 1);
+    if (!buf) { fclose(f); return NULL; }
+    size_t nread = fread(buf, 1, (size_t)len, f);
+    buf[nread] = '\0';
+    fclose(f);
+    return buf;
+}
+
+/* session_dir_path — resolve ID (or @ when id_arg is NULL) and write the
+   session directory into out. Returns 0, or -1 with the error printed. */
+static int session_dir_path(const char *repo_root, const char *id_arg,
+                            char *out, size_t outlen)
+{
+    char uuid[JB_UUID_LEN];
+    if (jb_resolve_id_arg(repo_root, id_arg ? id_arg : "@",
+                          uuid, sizeof(uuid)) != 0)
+        return -1;
+    snprintf(out, outlen, "%s/.jb/sessions/%s", repo_root, uuid);
+    return 0;
+}
+
+/* print_pretty_2 — cJSON formatted output uses tab indents; the reference
+   (§7 show) specifies indent 2. Tabs appear only as indentation (string
+   tabs are escaped), so each leading tab becomes two spaces. */
+static void print_pretty_2(cJSON *root)
+{
+    char *json = cJSON_PrintBuffered(root, 0, 1);
+    if (!json) return;
+    for (char *line = json; *line;) {
+        char *nl = strchr(line, '\n');
+        int tab = 0;
+        while (line[tab] == '\t') tab++;
+        for (int i = 0; i < tab * 2; i++) putchar(' ');
+        fwrite(line + tab, 1, (nl ? (size_t)(nl - line) : strlen(line)) - (size_t)tab, stdout);
+        if (nl) { putchar('\n'); line = nl + 1; } else break;
+    }
+    putchar('\n');
+    free(json);
+}
+
+/* cmd_show — pretty-print metadata.json (indent 2); the metadata path on
+   stderr; ID defaults to @ (§7) */
+int cmd_show(const char *id_arg)
+{
+    char repo_root[4096];
+    if (require_repo(repo_root, sizeof(repo_root)) != 0) return 1;
+
+    char dir[4096];
+    if (session_dir_path(repo_root, id_arg, dir, sizeof(dir)) != 0) return 1;
+
+    char meta_path[4096];
+    snprintf(meta_path, sizeof(meta_path), "%s/metadata.json", dir);
+    char *json = read_file(meta_path);
+    if (!json) {
+        fprintf(stderr, "jb: no metadata for '%s'\n", id_arg ? id_arg : "@");
+        return 1;
+    }
+    cJSON *root = cJSON_Parse(json);
+    free(json);
+    if (!root) {
+        fprintf(stderr, "jb: %s: cannot parse metadata\n", meta_path);
+        return 1;
+    }
+    fprintf(stderr, "jb: metadata: %s\n", meta_path);
+    print_pretty_2(root);
+    cJSON_Delete(root);
+    return 0;
+}

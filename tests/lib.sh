@@ -82,22 +82,24 @@ iso_ms() {
     fi
 }
 
-# fixture_session <uuid> <status> [subject] [author] [parent] — hand-built
-# session dir + metadata.json for the metadata verbs (phase 6: fixture
-# repos, no API calls). Subject defaults to the uuid; started_at is exactly
-# 2 minutes ago, ended_at now (unless status is working — then no ended_at).
-# The fixture mirrors what session.c writes (§6 of the reference).
+# fixture_session <uuid> <status> [subject] [author] [parent] [start_ago]
+# — hand-built session dir + metadata.json for the metadata verbs (phase
+# 6: fixture repos, no API calls). Subject defaults to the uuid; started_at
+# is exactly 2 minutes ago (or start_ago seconds) and ended_at now (unless
+# status is working — then no ended_at). The fixture mirrors what
+# session.c writes (§6 of the reference).
 fixture_session() {
     _uuid="$1"; _status="$2"
     _subject="${3:-fixture $1}"
     _author="${4:-}"
     _parent="${5:-}"
+    _start_ago="${6:-120}"
     _dir="$JB_SESSIONS_DIR/$_uuid"
     mkdir -p "$_dir"
     printf '{"type":"session","version":3,"id":"%s"}\n' "$_uuid" > "$_dir/session.jsonl"
     : > "$_dir/events.jsonl"
     _now=$(date +%s)
-    _start=$(iso_ms $((_now - 120)))
+    _start=$(iso_ms $((_now - _start_ago)))
     _end=$(iso_ms "$_now")
     {
         printf '{\n'

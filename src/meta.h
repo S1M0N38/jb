@@ -25,4 +25,8 @@ int jb_resolve_id_arg(const char *repo_root, const char *arg,
 /* jb path ID — print the absolute session directory. 0 · 1 not found · 2 usage */
 int cmd_path(const char *id_arg);
 
+/* jb show [ID] — pretty-print metadata.json (indent 2) to stdout; the
+   metadata path on stderr. ID defaults to @. 0 · 1 not found/not set */
+int cmd_show(const char *id_arg);
+
 #endif
