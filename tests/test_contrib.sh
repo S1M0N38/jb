@@ -1,10 +1,9 @@
 # test_contrib.sh — contrib scripts (jb-list, jb-view)
 
+repo_init
+
 # ---- Self-contained: create a session in this scratch (real API call) ----
-# jb-list/jb-view scan the session store; with per-test isolation there are
-# no sessions to scan unless this test creates one itself. If the API is
-# unavailable the checks below skip, exactly as they did before isolation.
-_out=$(prompt_pong | "$JB" 2>/dev/null)
+_out=$(prompt_pong | "$JB" run 2>/dev/null)
 if [ "$?" -eq 0 ]; then
     pass "create session for contrib tests"
 else
@@ -20,29 +19,20 @@ else
     fail "jb-list script exists and is executable" "not found or not executable"
 fi
 
-# jb-view should exist and be executable (renamed from jb-watch)
+# jb-view should exist and be executable
 if [ -x "$REPO_ROOT/contrib/jb-view" ]; then
     pass "jb-view script exists and is executable"
 else
     fail "jb-view script exists and is executable" "not found or not executable"
 fi
 
-# jb-list should output valid JSONL (one JSON object per line)
+# jb-list scans .jb/sessions/*/metadata.json
 if ls "$JB_SESSIONS_DIR"/*/metadata.json >/dev/null 2>&1; then
     _list_output=$("$REPO_ROOT/contrib/jb-list" 2>/dev/null)
     if [ -n "$_list_output" ]; then
         pass "jb-list produces output when sessions exist"
 
         # Each line should be valid JSON
-        _jsonl_ok=1
-        _line_count=0
-        echo "$_list_output" | while IFS= read -r _line || [ -n "$_line" ]; do
-            _line_count=$((_line_count + 1))
-            if ! printf '%s' "$_line" | jq empty 2>/dev/null; then
-                _jsonl_ok=0
-            fi
-        done
-        # Check at least one session was listed (we just created one)
         _first_line=$(echo "$_list_output" | head -1)
         if printf '%s' "$_first_line" | jq empty 2>/dev/null; then
             pass "jb-list outputs valid JSONL"
@@ -73,18 +63,18 @@ fi
 
 # ---- jb-view tests ----
 
-# jb-view --help or no args should show usage (or error about missing sessions is ok too)
-# We just verify it doesn't crash horribly
+# jb-view --help or no args should not crash
 _view_err=$("$REPO_ROOT/contrib/jb-view" --help 2>&1 || true)
-if [ -n "$_view_err" ] || [ $? -eq 0 ]; then
+_rc=$?
+if [ "$_rc" -eq 0 ] || [ "$_rc" -eq 1 ]; then
     pass "jb-view runs without crashing"
 else
-    fail "jb-view runs without crashing" "unexpected error"
+    fail "jb-view runs without crashing" "exit $_rc"
 fi
 
 # jb-view with the uuid of the session created in this scratch
 _latest_session=$(basename "$(newest_session)" 2>/dev/null)
-if [ -n "$_latest_session" ] && [ -f "$JB_SESSIONS_DIR/$_latest_session/state.jsonl" ]; then
+if [ -n "$_latest_session" ] && [ -f "$JB_SESSIONS_DIR/$_latest_session/session.jsonl" ]; then
     _view_output=$("$REPO_ROOT/contrib/jb-view" "$_latest_session" 2>/dev/null) || true
     if [ -n "$_view_output" ]; then
         pass "jb-view renders session output for UUID"

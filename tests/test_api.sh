@@ -1,18 +1,41 @@
-# test_api.sh — Goal 4: API layer, first request
+# test_api.sh — end-to-end: real API run over the new CLI
 
-# jb should send a prompt and get a text response
-# We ask a simple question and check stdout contains something
-_out=$(echo "respond with exactly the word PONG and nothing else" | "$JB" 2>/dev/null)
+repo_init
 
+# jb run sends the prompt and streams the answer to stdout
+_out=$(prompt_pong | "$JB" run 2>/dev/null)
 case "$_out" in
-    *"PONG"*) pass "jb returns model response on stdout" ;;
-    *)        fail "jb returns model response on stdout" "got: $(echo "$_out" | head -c 200)" ;;
+    *"PONG"*) pass "jb run returns model response on stdout" ;;
+    *)        fail "jb run returns model response on stdout" "got: $(echo "$_out" | head -c 200)" ;;
 esac
 
-# jb should exit 0 on success
-_actual=$(echo "say hi" | "$JB" >/dev/null 2>/dev/null; echo $?)
+# jb run exits 0 on success
+_actual=$(prompt_pong | "$JB" run >/dev/null 2>/dev/null; echo $?)
 if [ "$_actual" -eq 0 ]; then
-    pass "jb exits 0 after successful API call"
+    pass "jb run exits 0 after successful API call"
 else
-    fail "jb exits 0 after successful API call" "got $_actual"
+    fail "jb run exits 0 after successful API call" "got $_actual"
 fi
+
+# The session record: metadata completed, header + user entry recorded
+_latest=$(newest_session)
+if [ -z "$_latest" ]; then
+    fail "e2e session record" "no session dir found"
+    return 0
+fi
+_s=$(jq -r '.status // empty' "$_latest/metadata.json" 2>/dev/null)
+if [ "$_s" = "completed" ]; then
+    pass "e2e: metadata working → completed"
+else
+    fail "e2e: metadata working → completed" "got: $_s"
+fi
+_head=$(head -1 "$_latest/session.jsonl")
+case "$_head" in
+    *'"type":"session"'*) pass "e2e: v3 header recorded" ;;
+    *)                    fail "e2e: v3 header recorded" "got: $(echo "$_head" | head -c 100)" ;;
+esac
+_tail=$(tail -1 "$_latest/session.jsonl")
+case "$_tail" in
+    *'"role":"user"'*) pass "e2e: user message recorded" ;;
+    *)                 fail "e2e: user message recorded" "got: $(echo "$_tail" | head -c 100)" ;;
+esac

@@ -23,8 +23,9 @@ else
     fail "scratch env: cache and tmp redirected" "XDG_CACHE_HOME=$XDG_CACHE_HOME TMPDIR=$TMPDIR"
 fi
 
-# A real run lands in the scratch, never the real cache
-_out=$(prompt_pong | "$JB" 2>/dev/null)
+# A real run lands in the repo, never the real cache
+repo_init
+_out=$(prompt_pong | "$JB" run 2>/dev/null)
 _latest=$(newest_session)
 if [ -n "$_latest" ]; then
     pass "jb run creates a session in the scratch"

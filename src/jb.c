@@ -177,7 +177,7 @@ static int find_repo(const char *start, char *out, size_t outlen)
 static int api_chat_with_retry(const jb_config *cfg, cJSON *messages, cJSON *tools,
                                api_response *resp);
 
-static int cmd_run(const char *config_path, const char *argv0);
+static int cmd_run(const char *config_path, const char *argv0, int run_argc, char **run_argv);
 static int api_chat_with_retry(const jb_config *cfg, cJSON *messages, cJSON *tools,
                                api_response *resp)
 {
@@ -278,15 +278,33 @@ int main(int argc, char **argv)
         return cmd_init();
     }
     if (strcmp(verb, "run") == 0) {
-        return cmd_run(config_path, argv[0]);
+        return cmd_run(config_path, argv[0], argc - i - 1, argv + i + 1);
     }
 
     fprintf(stderr, "jb: unknown command '%s' (see 'jb help')\n", verb);
     return 2;
 }
 
-static int cmd_run(const char *config_path, const char *argv0)
+static int cmd_run(const char *config_path, const char *argv0, int run_argc, char **run_argv)
 {
+    /* run verb flags: --config PATH (may also appear as a global flag) */
+    for (int j = 0; j < run_argc; j++) {
+        if (strcmp(run_argv[j], "--config") == 0) {
+            if (config_path) {
+                fprintf(stderr, "jb: --config specified multiple times\n");
+                return 2;
+            }
+            if (j + 1 >= run_argc) {
+                fprintf(stderr, "jb: --config requires a path\n");
+                return 2;
+            }
+            config_path = run_argv[++j];
+        } else {
+            fprintf(stderr, "jb: unknown option '%s' for 'run'\n", run_argv[j]);
+            return 2;
+        }
+    }
+
     /* Resolve the repository: walk up from cwd (fatal outside any repo) */
     char cwd_buf[4096];
     const char *cwd = getcwd(cwd_buf, sizeof(cwd_buf)) ? cwd_buf : ".";

@@ -18,13 +18,19 @@ REAL_CFG="${XDG_CONFIG_HOME:-$HOME/.config}/jb/config.json"
 # Per-test session store; set by repo_init() to $SCRATCH/.jb/sessions.
 JB_SESSIONS_DIR=""
 
+# Captured at source time — BEFORE any scratch override: the real tmp root.
+# Scratch dirs must be SIBLINGS under it: new_scratch() overrides TMPDIR into
+# the scratch, so re-reading ${TMPDIR:-/tmp} per call would nest scratches
+# and leak repo context between tests (repo walk-up finds an outer .jb).
+REAL_TMP="${TMPDIR:-/tmp}"
+
 # All scratch dirs created so far; run.sh's EXIT trap removes them
 # unless TEST_KEEP=1.
 SCRATCHES=""
 
 # new_scratch — fresh scratch dir with an isolated environment, cd into it.
 new_scratch() {
-    SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/jb-test.XXXXXX")
+    SCRATCH=$(mktemp -d "$REAL_TMP/jb-test.XXXXXX")
     SCRATCHES="$SCRATCHES $SCRATCH"
     mkdir -p "$SCRATCH/.config/jb" "$SCRATCH/.cache" "$SCRATCH/tmp"
     if [ -f "$REAL_CFG" ]; then

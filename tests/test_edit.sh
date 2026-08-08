@@ -1,9 +1,11 @@
-# test_edit.sh — Goal 6: edit tool
+# test_edit.sh — edit tool
+
+repo_init
 
 # Create a test file in the scratch cwd, then ask jb to edit it
 echo "Hello World" > edit_target.txt
 
-_out=$(echo "Edit the file edit_target.txt: replace 'World' with 'jb'. Reply with the final content." | "$JB" 2>/dev/null)
+_out=$(echo "Edit the file edit_target.txt: replace 'World' with 'jb'. Reply with the final content." | "$JB" run 2>/dev/null)
 
 case "$_out" in
     *Hello*jb*) pass "jb uses edit tool to modify file" ;;

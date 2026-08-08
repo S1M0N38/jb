@@ -1,7 +1,7 @@
 #!/bin/sh
 # jb-view — sidecar session formatter for jb
-# Reads state.jsonl and formats events as a streaming log.
-# Upgraded: reads metadata.json for enriched session header.
+# Reads .jb/sessions/<uuid>/session.jsonl (pi format v3) and formats the
+# conversation as a readable log. Phase 9 restores the rich tool-call view.
 
 # ---- ANSI ----
 R='\033[0m'
@@ -17,8 +17,21 @@ if ! command -v jq >/dev/null 2>&1; then
     exit 1
 fi
 
-# ---- Session discovery ----
-SESSIONS_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/jb/sessions"
+# ---- Session discovery: resolve the repo by walking up from cwd ----
+dir=$(pwd)
+SESSIONS_DIR=""
+while [ -n "$dir" ]; do
+    if [ -d "$dir/.jb/sessions" ]; then
+        SESSIONS_DIR="$dir/.jb/sessions"
+        break
+    fi
+    dir=${dir%/*}
+done
+
+if [ -z "$SESSIONS_DIR" ]; then
+    echo "jb-view: not a jb repository (run 'jb init')" >&2
+    exit 1
+fi
 
 if [ -n "$1" ]; then
     SESSION_UUID="$1"
@@ -31,7 +44,7 @@ if [ -z "$SESSION_UUID" ]; then
     exit 1
 fi
 
-STATE_FILE="$SESSIONS_DIR/$SESSION_UUID/state.jsonl"
+STATE_FILE="$SESSIONS_DIR/$SESSION_UUID/session.jsonl"
 META_FILE="$SESSIONS_DIR/$SESSION_UUID/metadata.json"
 
 if [ ! -f "$STATE_FILE" ]; then
@@ -39,93 +52,29 @@ if [ ! -f "$STATE_FILE" ]; then
     exit 1
 fi
 
-# ---- Session header (with metadata) ----
+# ---- Session header (from metadata) ----
 if [ -f "$META_FILE" ]; then
     _uuid=$(jq -r '.uuid // empty' "$META_FILE" 2>/dev/null)
     _status=$(jq -r '.status // empty' "$META_FILE" 2>/dev/null)
     _model=$(jq -r '.config.model // empty' "$META_FILE" 2>/dev/null)
     _turns=$(jq -r '.turns // empty' "$META_FILE" 2>/dev/null)
-    _title=$(jq -r '.title // empty' "$META_FILE" 2>/dev/null)
+    _subject=$(jq -r '.subject // empty' "$META_FILE" 2>/dev/null)
 
-    # Shorten UUID for display
     _short_uuid=$(printf '%s' "$_uuid" | cut -c1-8)
 
-        # Build header line
     _header_parts="$_short_uuid"
     [ -n "$_status" ] && _header_parts="$_header_parts  $_status"
     [ -n "$_model" ] && _header_parts="$_header_parts  $_model"
     [ -n "$_turns" ] && [ "$_turns" != "null" ] && _header_parts="$_header_parts  ${_turns} turns"
 
-    # Show strong link (parent) and weak link (spawned_from) if present
-    _parent=$(jq -r '.parent // empty' "$META_FILE" 2>/dev/null)
-    if [ -n "$_parent" ]; then
-        _short_parent=$(printf '%s' "$_parent" | cut -c1-8)
-        _header_parts="$_header_parts  parent:$_short_parent"
-    fi
-    _spawned=$(jq -r '.spawned_from // empty' "$META_FILE" 2>/dev/null)
-    if [ -n "$_spawned" ]; then
-        _short_spawned=$(printf '%s' "$_spawned" | cut -c1-8)
-        _header_parts="$_header_parts  from:$_short_spawned"
-    fi
-
     printf "${D}session %s${R}\n" "$_header_parts"
-    [ -n "$_title" ] && printf "${D}> %s${R}\n\n" "$_title"
-else
-    # Fallback: stat-based header (original behavior)
-    if stat -f "%Sm" >/dev/null 2>&1; then
-        SESSION_DATE=$(stat -f "%Sm" -t "%Y-%m-%d %H:%M" "$SESSIONS_DIR/$SESSION_UUID" 2>/dev/null || echo "unknown")
-    else
-        SESSION_DATE=$(stat -c "%y" "$SESSIONS_DIR/$SESSION_UUID" 2>/dev/null | cut -d'.' -f1 || echo "unknown")
-    fi
-    printf "${D}session %s  %s${R}\n\n" "$SESSION_UUID" "$SESSION_DATE"
+    [ -n "$_subject" ] && printf "${D}> %s${R}\n\n" "$_subject"
 fi
-
-# ---- Tool call lookup ----
-LOOKUP_FILE=$(mktemp)
-trap 'rm -f "$LOOKUP_FILE"' EXIT INT TERM
-
-store_tool_call() {
-    printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$LOOKUP_FILE"
-}
-
-lookup_tool_call() {
-    grep "^${_lid}	" "$LOOKUP_FILE" 2>/dev/null | head -1 | while IFS='	' read -r _ __name __args; do
-        printf '%s\n%s\n' "$__name" "$__args"
-    done
-}
 
 # ---- Truncation ----
 MAX_LINES=6
 
-# ---- Rendering ----
-
-render_user() {
-    _first_line=$(printf '%s' "$1" | head -1)
-    printf "${CYN}${B}>${R} %s\n\n" "$_first_line"
-}
-
-render_tool_call_header() {
-    _name="$1" _args="$2" _summary=""
-    case "$_name" in
-        read)
-            _path=$(printf '%s' "$_args" | jq -r '.path // ""' 2>/dev/null)
-            _offset=$(printf '%s' "$_args" | jq -r '.offset // ""' 2>/dev/null)
-            _limit=$(printf '%s' "$_args" | jq -r '.limit // ""' 2>/dev/null)
-            if [ -n "$_offset" ] && [ "$_offset" != "null" ] && [ -n "$_limit" ] && [ "$_limit" != "null" ]; then
-                _summary="$_path:$((_offset + _limit - 1))"
-            else
-                _summary="$_path"
-            fi ;;
-        write) _summary=$(printf '%s' "$_args" | jq -r '.path // ""' 2>/dev/null) ;;
-        edit)  _summary=$(printf '%s' "$_args" | jq -r '.path // ""' 2>/dev/null) ;;
-        bash)  _summary=$(printf '%s' "$_args" | jq -r '.command // ""' 2>/dev/null) ;;
-        jb)    _summary=$(printf '%s' "$_args" | jq -r '.prompt // ""' 2>/dev/null | head -c 60) ;;
-        *)     _summary=$(printf '%s' "$_args" | head -c 80 2>/dev/null) ;;
-    esac
-    printf "${YEL}${B}%s${R} ${D}%s${R}\n" "$_name" "$_summary"
-}
-
-render_content() {
+render_text() {
     _n=0
     printf '%s\n' "$1" | while IFS= read -r _line || [ -n "$_line" ]; do
         _n=$((_n + 1))
@@ -134,124 +83,22 @@ render_content() {
     done
 }
 
-render_edit_lines() {
-    _old="$1" _new="$2"
-    _n=0
-    if [ -n "$_old" ] && [ "$_old" != "null" ]; then
-        printf '%s\n' "$_old" | while IFS= read -r _line || [ -n "$_line" ]; do
-            _n=$((_n + 1))
-            if [ "$_n" -gt "$MAX_LINES" ]; then printf "${D}...${R}\n"; break; fi
-            printf "${D}- %s${R}\n" "$_line"
-        done
-    fi
-    _n=0
-    if [ -n "$_new" ] && [ "$_new" != "null" ]; then
-        printf '%s\n' "$_new" | while IFS= read -r _line || [ -n "$_line" ]; do
-            _n=$((_n + 1))
-            if [ "$_n" -gt "$MAX_LINES" ]; then printf "${D}...${R}\n"; break; fi
-            printf "${D}+ %s${R}\n" "$_line"
-        done
-    fi
-}
-
-render_edit_result() {
-    _args="$1"
-    _has_edits=$(printf '%s' "$_args" | jq 'has("edits")' 2>/dev/null)
-    if [ "$_has_edits" = "true" ]; then
-        _ne=$(printf '%s' "$_args" | jq '.edits | length' 2>/dev/null)
-        _ei=0
-        while [ "$_ei" -lt "$_ne" ]; do
-            render_edit_lines \
-                "$(printf '%s' "$_args" | jq -r ".edits[$_ei].oldText // \"\"" 2>/dev/null)" \
-                "$(printf '%s' "$_args" | jq -r ".edits[$_ei].newText // \"\"" 2>/dev/null)"
-            _ei=$((_ei + 1))
-        done
-    else
-        render_edit_lines \
-            "$(printf '%s' "$_args" | jq -r '.oldText // ""' 2>/dev/null)" \
-            "$(printf '%s' "$_args" | jq -r '.newText // ""' 2>/dev/null)"
-    fi
-}
-
-render_write_result() {
-    _content=$(printf '%s' "$_args" | jq -r '.content // ""' 2>/dev/null)
-    if [ -z "$_content" ] || [ "$_content" = "null" ]; then return; fi
-    _n=0
-    printf '%s\n' "$_content" | while IFS= read -r _line || [ -n "$_line" ]; do
-        _n=$((_n + 1))
-        if [ "$_n" -gt "$MAX_LINES" ]; then printf "${D}...${R}\n"; break; fi
-        printf "${D}+ %s${R}\n" "$_line"
-    done
-}
-
-render_answer() {
-    _first=1
-    printf '%s\n' "$1" | while IFS= read -r _line || [ -n "$_line" ]; do
-        if [ "$_first" = "1" ]; then
-            printf "${GRN}${B}=${R} %s\n" "$_line"; _first=0
-        else
-            printf "%s\n" "$_line"
-        fi
-    done
-    printf "\n"
-}
-
-# ---- Main line processor ----
-process_line() {
-    _role=$(printf '%s' "$1" | jq -r '.role // ""' 2>/dev/null)
-
-    case "$_role" in
-        system) ;;
-        user)
-            render_user "$(printf '%s' "$1" | jq -r '.content // ""' 2>/dev/null)"
-            ;;
-        assistant)
-            _tool_calls=$(printf '%s' "$1" | jq -c '.tool_calls // empty' 2>/dev/null)
-            _content=$(printf '%s' "$1" | jq -r '.content // ""' 2>/dev/null)
-
-            if [ -n "$_tool_calls" ] && [ "$_tool_calls" != "null" ]; then
-                _tc_count=$(printf '%s' "$_tool_calls" | jq 'length' 2>/dev/null)
-                _tc_i=0
-                while [ "$_tc_i" -lt "$_tc_count" ]; do
-                    _tc=$(printf '%s' "$_tool_calls" | jq -c ".[$_tc_i]" 2>/dev/null)
-                    _tc_id=$(printf '%s' "$_tc" | jq -r '.id // ""' 2>/dev/null)
-                    _tc_name=$(printf '%s' "$_tc" | jq -r '.function.name // ""' 2>/dev/null)
-                    _tc_args=$(printf '%s' "$_tc" | jq -r '.function.arguments // ""' 2>/dev/null)
-                    store_tool_call "$_tc_id" "$_tc_name" "$_tc_args"
-                    render_tool_call_header "$_tc_name" "$_tc_args"
-                    _tc_i=$((_tc_i + 1))
-                done
-            elif [ -n "$_content" ] && [ "$_content" != "null" ] && [ "$_content" != "" ]; then
-                render_answer "$_content"
-            fi
-            ;;
-        tool)
-            _tc_id=$(printf '%s' "$1" | jq -r '.tool_call_id // ""' 2>/dev/null)
-            _content=$(printf '%s' "$1" | jq -r '.content // ""' 2>/dev/null)
-            _lid="$_tc_id"
-            _lookup=$(lookup_tool_call "$_tc_id")
-            if [ -n "$_lookup" ]; then
-                _tc_name=$(printf '%s' "$_lookup" | head -1)
-                _tc_args=$(printf '%s' "$_lookup" | tail -1)
-                case "$_tc_name" in
-                    write) render_write_result "$_tc_args" ;;
-                    edit)  render_edit_result "$_tc_args" ;;
-                    *)     render_content "$_content" ;;
-                esac
-            else
-                render_content "$_content"
-            fi
-            printf "\n"
-            ;;
+# ---- Render pi-format entries ----
+jq -r '
+  select(.type == "message") |
+  .message |
+  if .role == "user" then
+    "USER: " + (.content | map(select(.type == "text") | .text) | join(""))
+  elif .role == "assistant" then
+    "ASSISTANT: " + (.content | map(select(.type == "text") | .text) | join(""))
+  elif .role == "toolResult" then
+    "TOOL " + (.toolName // "") + ": " + (.content | map(select(.type == "text") | .text) | join(""))
+  else empty end
+' "$STATE_FILE" | while IFS= read -r _line || [ -n "$_line" ]; do
+    case "$_line" in
+        USER:*)      printf "${CYN}${B}%s${R}\n" "$_line" ;;
+        ASSISTANT:*) printf "%s\n" "$_line" ;;
+        TOOL*)       printf "${YEL}${B}%s${R}\n" "$_line" ;;
+        *)           printf "%s\n" "$_line" ;;
     esac
-}
-
-# ---- Replay existing lines ----
-
-EXISTING_LINES=$(wc -l < "$STATE_FILE" 2>/dev/null | tr -d ' ')
-
-if [ "$EXISTING_LINES" -gt 0 ]; then
-    while IFS= read -r _line || [ -n "$_line" ]; do
-        process_line "$_line"
-    done < "$STATE_FILE"
-fi
+done

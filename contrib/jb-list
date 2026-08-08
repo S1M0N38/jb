@@ -2,7 +2,18 @@
 # jb-list — list all jb sessions by reading metadata.json files
 # Outputs JSONL (one JSON object per line) for composition with jq/grep
 
-SESSIONS_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/jb/sessions"
+# Resolve the repository by walking up from cwd (same as jb itself)
+dir=$(pwd)
+SESSIONS_DIR=""
+while [ -n "$dir" ]; do
+    if [ -d "$dir/.jb/sessions" ]; then
+        SESSIONS_DIR="$dir/.jb/sessions"
+        break
+    fi
+    dir=${dir%/*}
+done
+
+[ -n "$SESSIONS_DIR" ] || exit 0
 
 # List all session directories that have a metadata.json
 for sess_dir in "$SESSIONS_DIR"/*/; do
