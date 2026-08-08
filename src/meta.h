@@ -37,4 +37,8 @@ int cmd_ps(void);
    repo summary. Stale JB_SESSION warns and falls back. 0 · 1 not a repo */
 int cmd_status(void);
 
+/* jb log [--graph] — flat list (newest first) or the committed forest.
+   0 · 1 not a repo · 2 usage */
+int cmd_log(const char *graph_arg);
+
 #endif

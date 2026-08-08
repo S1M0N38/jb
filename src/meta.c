@@ -160,6 +160,7 @@ typedef struct {
     char parent[JB_UUID_LEN];
     long long started_ms;
     long long ended_ms;
+    long exit_code;
     int has_ended;
 } session_rec;
 
@@ -278,6 +279,9 @@ static int session_list_scan(const char *repo_root, session_list *list)
             rec.ended_ms = iso_ms_to_epoch(v->valuestring) * 1000;
             rec.has_ended = 1;
         }
+        v = cJSON_GetObjectItemCaseSensitive(root, "exit_code");
+        if (cJSON_IsNumber(v))
+            rec.exit_code = (long)v->valuedouble;
         cJSON_Delete(root);
 
         if (!rec.uuid[0]) continue;
@@ -442,6 +446,156 @@ int cmd_status(void)
 
     printf("repo: %d sessions · %d committed · %d working · %d completed · %d error\n",
            list.n, n_committed, n_working, n_completed, n_error);
+    session_list_free(&list);
+    return 0;
+}
+
+/* ---- jb log: flat + the committed forest ---- */
+
+/* find_session — index of the session with the given uuid in list, or -1 */
+static int find_session(const session_list *list, const char *uuid)
+{
+    for (int i = 0; i < list->n; i++)
+        if (strcmp(list->items[i].uuid, uuid) == 0) return i;
+    return -1;
+}
+
+/* cmd_log — flat: id<TAB>status<TAB>author<TAB>age<TAB>subject, newest
+   first. --graph: the committed forest only — roots oldest-first,
+   children by start time; <id> [error] <kind> "<subject>" with kind
+   root|fork|fresh; every edge is ├── / └── (§7). */
+int cmd_log(const char *graph_arg)
+{
+    char repo_root[4096];
+    if (require_repo(repo_root, sizeof(repo_root)) != 0) return 1;
+
+    int graph = 0;
+    if (graph_arg) {
+        if (strcmp(graph_arg, "--graph") == 0) graph = 1;
+        else {
+            fprintf(stderr, "jb: unknown option '%s' for 'log'\n", graph_arg);
+            return 2;
+        }
+    }
+
+    session_list list = {0};
+    session_list_scan(repo_root, &list);
+    long long now = jb_epoch_ms();
+
+    if (!graph) {
+        qsort(list.items, (size_t)list.n, sizeof(*list.items), cmp_started_desc);
+        for (int i = 0; i < list.n; i++) {
+            session_rec *r = &list.items[i];
+            char sid[9], author[9], age[32], subj[64];
+            id8(r->uuid, sid, sizeof(sid));
+            if (r->author[0]) id8(r->author, author, sizeof(author));
+            else snprintf(author, sizeof(author), "-");
+            age_short(now, rec_age_ms(r), age, sizeof(age));
+            subject_trunc(r->subject, subj, sizeof(subj));
+            printf("%s\t%s\t%s\t%s\t%s\n", sid, r->status, author, age, subj);
+        }
+        session_list_free(&list);
+        return 0;
+    }
+
+    /* graph: committed nodes only, linked to their nearest committed
+       ancestor. kind: root (no parent) / fork (parent committed) /
+       fresh (parent exists but is not committed). */
+    enum { KIND_ROOT, KIND_FORK, KIND_FRESH };
+    typedef struct {
+        session_rec *rec;
+        int parent;   /* index into nodes, or -1 for top-level */
+        int kind;
+    } graph_node;
+
+    int n = 0;
+    for (int i = 0; i < list.n; i++)
+        if (strcmp(list.items[i].status, "committed") == 0) n++;
+    graph_node *nodes = calloc((size_t)(n ? n : 1), sizeof(*nodes));
+    int ni = 0;
+    for (int i = 0; i < list.n; i++) {
+        if (strcmp(list.items[i].status, "committed") != 0) continue;
+        nodes[ni].rec = &list.items[i];
+        nodes[ni].parent = -1;
+        nodes[ni].kind = KIND_ROOT;
+        ni++;
+    }
+
+    for (int i = 0; i < ni; i++) {
+        /* walk parent pointers to the nearest committed ancestor */
+        const char *p = nodes[i].rec->parent;
+        int ancestor = -1;
+        int guard = 0;
+        while (p[0] && guard++ < 64) {
+            int idx = find_session(&list, p);
+            if (idx < 0) break;                 /* chain ends */
+            if (strcmp(list.items[idx].status, "committed") == 0) {
+                ancestor = idx;
+                break;
+            }
+            p = list.items[idx].parent;         /* keep walking */
+        }
+        if (ancestor >= 0) {
+            /* parent index in nodes[] — the ancestor's own node */
+            for (int j = 0; j < ni; j++) {
+                if (nodes[j].rec == &list.items[ancestor]) {
+                    nodes[i].parent = j;
+                    break;
+                }
+            }
+            nodes[i].kind = (strcmp(nodes[i].rec->parent,
+                                     list.items[ancestor].uuid) == 0)
+                                ? KIND_FORK : KIND_FRESH;
+        } else {
+            nodes[i].kind = nodes[i].rec->parent[0] ? KIND_FRESH : KIND_ROOT;
+        }
+    }
+
+    /* top-level nodes: no committed ancestor, oldest first */
+    int *roots = malloc((size_t)(ni ? ni : 1) * sizeof(*roots));
+    int rn = 0;
+    for (int i = 0; i < ni; i++)
+        if (nodes[i].parent < 0) roots[rn++] = i;
+    /* sort roots by started asc */
+    for (int i = 0; i < rn; i++)
+        for (int j = i + 1; j < rn; j++)
+            if (nodes[roots[j]].rec->started_ms < nodes[roots[i]].rec->started_ms) {
+                int t = roots[i]; roots[i] = roots[j]; roots[j] = t;
+            }
+
+    const char *kind_name[] = { "root", "fork", "fresh" };
+    for (int r = 0; r < rn; r++) {
+        int ri = roots[r];
+        /* children of ri, by start time asc */
+        int *kids = malloc((size_t)(ni ? ni : 1) * sizeof(*kids));
+        int kn = 0;
+        for (int i = 0; i < ni; i++)
+            if (nodes[i].parent == ri) kids[kn++] = i;
+        for (int i = 0; i < kn; i++)
+            for (int j = i + 1; j < kn; j++)
+                if (nodes[kids[j]].rec->started_ms < nodes[kids[i]].rec->started_ms) {
+                    int t = kids[i]; kids[i] = kids[j]; kids[j] = t;
+                }
+
+        char sid[9], subj[64];
+        id8(nodes[ri].rec->uuid, sid, sizeof(sid));
+        subject_trunc(nodes[ri].rec->subject, subj, sizeof(subj));
+        printf("%s  %s%s  \"%s\"\n", sid,
+               nodes[ri].rec->exit_code != 0 ? "[error]  " : "",
+               kind_name[nodes[ri].kind], subj);
+        for (int k = 0; k < kn; k++) {
+            int ci = kids[k];
+            id8(nodes[ci].rec->uuid, sid, sizeof(sid));
+            subject_trunc(nodes[ci].rec->subject, subj, sizeof(subj));
+            printf("%s %s  %s%s  \"%s\"\n",
+                   k == kn - 1 ? "└──" : "├──", sid,
+                   nodes[ci].rec->exit_code != 0 ? "[error]  " : "",
+                   kind_name[nodes[ci].kind], subj);
+        }
+        free(kids);
+    }
+    free(roots);
+    free(nodes);
     session_list_free(&list);
     return 0;
 }

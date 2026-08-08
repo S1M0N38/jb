@@ -83,17 +83,18 @@ iso_ms() {
 }
 
 # fixture_session <uuid> <status> [subject] [author] [parent] [start_ago]
-# — hand-built session dir + metadata.json for the metadata verbs (phase
-# 6: fixture repos, no API calls). Subject defaults to the uuid; started_at
-# is exactly 2 minutes ago (or start_ago seconds) and ended_at now (unless
-# status is working — then no ended_at). The fixture mirrors what
-# session.c writes (§6 of the reference).
+# [exit_code] — hand-built session dir + metadata.json for the metadata
+# verbs (phase 6: fixture repos, no API calls). Subject defaults to the
+# uuid; started_at is exactly 2 minutes ago (or start_ago seconds) and
+# ended_at now (unless status is working — then no ended_at). The fixture
+# mirrors what session.c writes (§6 of the reference).
 fixture_session() {
     _fs_uuid="$1"; _fs_status="$2"
     _fs_subject="${3:-fixture $1}"
     _fs_author="${4:-}"
     _fs_parent="${5:-}"
     _fs_start_ago="${6:-120}"
+    _fs_exit="${7:-0}"
     _fs_dir="$JB_SESSIONS_DIR/$_fs_uuid"
     mkdir -p "$_fs_dir"
     printf '{"type":"session","version":3,"id":"%s"}\n' "$_fs_uuid" > "$_fs_dir/session.jsonl"
@@ -117,7 +118,7 @@ fixture_session() {
         fi
         printf '  "working_dir": "%s",\n' "$SCRATCH"
         printf '  "config": {"api_url":"https://api.openai.com/v1","model":"gpt-4.1","max_tokens":500000,"max_output_lines":2000,"max_output_bytes":51200},\n'
-        printf '  "turns": 1, "tokens_used": 10, "exit_code": 0,\n'
+        printf '  "turns": 1, "tokens_used": 10, "exit_code": %s,\n' "$_fs_exit"
         printf '  "last_activity": "%s"\n' "$_fs_end"
         printf '}\n'
     } > "$_fs_dir/metadata.json"
