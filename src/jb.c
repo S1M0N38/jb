@@ -17,6 +17,10 @@
 static jb_session g_session;
 static int g_session_active = 0;
 static char *g_partial_answer = NULL;
+/* 1 while a message_start has been emitted for the in-flight assistant
+   response and its message_end has not — the SIGINT handler uses it to
+   close the events stream (message_end aborted + agent_end). */
+static int g_msg_in_flight = 0;
 
 /* JSON-escape a string into out — allocation-free, safe for the signal
    handler. Truncates when out is nearly full. */
@@ -24,6 +28,10 @@ static void json_escape(const char *in, char *out, size_t outlen);
 
 /* provider = hostname of api_url, reference §3.4: */
 static void provider_from_url(const char *api_url, char *out, size_t outlen);
+
+/* usage object — zeros when the provider sends nothing (§3.4) */
+static cJSON *usage_object(long prompt_tokens, long completion_tokens,
+                           long reasoning_tokens, long total_tokens);
 
 static void json_escape(const char *in, char *out, size_t outlen)
 {
@@ -92,16 +100,35 @@ static void handle_signal(int sig)
                 snprintf(parentq, sizeof(parentq), "null");
             }
 
+            /* The aborted §3.3 message object — shared by the session.jsonl
+               entry and the events stream's message_end. */
+            char msgobj[12288];
+            snprintf(msgobj, sizeof(msgobj),
+                "{\"role\":\"assistant\",\"content\":%s,"
+                "%s%s"
+                "\"api\":\"openai-completions\",\"stopReason\":\"aborted\","
+                "\"errorMessage\":\"interrupted by signal %d\",\"timestamp\":%ld}",
+                block, provq, modelq, sig, jb_epoch_ms());
+
             char line[12288];
             snprintf(line, sizeof(line),
                 "{\"type\":\"message\",\"id\":\"%s\",\"parentId\":%s,"
                 "\"timestamp\":\"%s\","
-                "\"message\":{\"role\":\"assistant\",\"content\":%s,"
-                "%s%s"
-                "\"api\":\"openai-completions\",\"stopReason\":\"aborted\","
-                "\"errorMessage\":\"interrupted by signal %d\",\"timestamp\":%ld}}",
-                id8, parentq, ts, block, provq, modelq, sig, jb_epoch_ms());
+                "\"message\":%s}",
+                id8, parentq, ts, msgobj);
             session_append_raw(&g_session, line);
+
+            /* Events stream (§5): the run was mid-message — close the
+               message with an aborted message_end, then agent_end so the
+               stream never dangles. Hand-built (no cJSON in a handler). */
+            if (g_msg_in_flight && g_session.events_fp) {
+                char ev[12304];
+                snprintf(ev, sizeof(ev),
+                    "{\"type\":\"message_end\",\"message\":%s}", msgobj);
+                session_append_event(&g_session, ev);
+            }
+            if (g_session.events_fp)
+                session_append_event(&g_session, "{\"type\":\"agent_end\"}");
         }
         session_write_metadata_close(&g_session, "interrupted", 0, 0,
                                      sig == SIGINT ? 130 : 143);
@@ -259,7 +286,8 @@ static int find_repo(const char *start, char *out, size_t outlen)
 
 /* Retry wrapper for api_chat — retries on transient errors */
 static int api_chat_with_retry(const jb_config *cfg, const char *sys_prompt,
-                               cJSON *messages, cJSON *tools, api_response *resp);
+                               cJSON *messages, cJSON *tools, api_response *resp,
+                               sse_delta_cb on_delta, void *delta_userdata);
 
 /* Resolve a session ID argument for --fork/--seed: "@" reads $JB_SESSION
    (unset → "jb: JB_SESSION not set"). Prints the reference error and
@@ -290,13 +318,15 @@ static int resolve_id_arg(const char *repo_root, const char *arg,
 
 static int cmd_run(const char *config_path, const char *argv0, int run_argc, char **run_argv);
 static int api_chat_with_retry(const jb_config *cfg, const char *sys_prompt,
-                               cJSON *messages, cJSON *tools, api_response *resp)
+                               cJSON *messages, cJSON *tools, api_response *resp,
+                               sse_delta_cb on_delta, void *delta_userdata)
 {
     int max_retries = 3;
     int base_delay = 2;  /* seconds */
 
     for (int attempt = 0; attempt <= max_retries; attempt++) {
-        int rc = api_chat(cfg, sys_prompt, messages, tools, resp);
+        int rc = api_chat(cfg, sys_prompt, messages, tools, resp,
+                          on_delta, delta_userdata);
 
         if (rc == 0) return 0;
 
@@ -316,6 +346,154 @@ static int api_chat_with_retry(const jb_config *cfg, const char *sys_prompt,
     }
 
     return -1;
+}
+
+/* ---- events.jsonl emission (§5) — the live stream ---- */
+
+/* Print + append one event line; emission errors never change the exit
+   code (§10 failure policy — the files are the record, the loop's source
+   of truth is in-memory). */
+static void emit_event(jb_session *sess, cJSON *ev)
+{
+    char *s = cJSON_PrintUnformatted(ev);
+    if (s) {
+        session_append_event(sess, s);
+        free(s);
+    }
+}
+
+/* Once per run. */
+static void emit_agent_start(jb_session *sess)
+{
+    cJSON *ev = cJSON_CreateObject();
+    cJSON_AddStringToObject(ev, "type", "agent_start");
+    emit_event(sess, ev);
+    cJSON_Delete(ev);
+}
+
+/* Once per run, last line: the final messages array. */
+static void emit_agent_end(jb_session *sess, cJSON *messages)
+{
+    cJSON *ev = cJSON_CreateObject();
+    cJSON_AddStringToObject(ev, "type", "agent_end");
+    cJSON_AddItemReferenceToObject(ev, "messages", messages);
+    emit_event(sess, ev);
+    cJSON_Delete(ev);
+}
+
+/* Per assistant response: the pending message (§5). */
+static void emit_message_start(jb_session *sess, const jb_config *cfg)
+{
+    g_msg_in_flight = 1;
+    cJSON *ev = cJSON_CreateObject();
+    cJSON_AddStringToObject(ev, "type", "message_start");
+    cJSON *msg = cJSON_CreateObject();
+    cJSON_AddStringToObject(msg, "role", "assistant");
+    cJSON_AddItemToObject(msg, "content", cJSON_CreateArray());
+    cJSON_AddStringToObject(msg, "api", "openai-completions");
+    char provider[128];
+    provider_from_url(cfg->api_url, provider, sizeof(provider));
+    cJSON_AddStringToObject(msg, "provider", provider);
+    cJSON_AddStringToObject(msg, "model", cfg->model);
+    cJSON_AddItemToObject(msg, "usage", usage_object(0, 0, 0, 0));
+    cJSON_AddStringToObject(msg, "stopReason", "pending");
+    cJSON_AddNumberToObject(msg, "timestamp", jb_epoch_ms());
+    cJSON_AddItemToObject(ev, "message", msg);
+    emit_event(sess, ev);
+    cJSON_Delete(ev);
+}
+
+/* Per assistant response, authoritative: the final message object. */
+static void emit_message_end(jb_session *sess, cJSON *message)
+{
+    g_msg_in_flight = 0;
+    cJSON *ev = cJSON_CreateObject();
+    cJSON_AddStringToObject(ev, "type", "message_end");
+    cJSON_AddItemReferenceToObject(ev, "message", message);
+    emit_event(sess, ev);
+    cJSON_Delete(ev);
+}
+
+/* Per executed tool: before execution — args as the parsed object (§5). */
+static void emit_tool_execution_start(jb_session *sess, const char *id,
+                                      const char *name, const char *args_raw)
+{
+    cJSON *ev = cJSON_CreateObject();
+    cJSON_AddStringToObject(ev, "type", "tool_execution_start");
+    cJSON_AddStringToObject(ev, "toolCallId", id);
+    cJSON_AddStringToObject(ev, "toolName", name);
+    /* Parsed object; unparseable → {} (same rule as §3.4) */
+    cJSON *parsed = cJSON_Parse(args_raw ? args_raw : "");
+    if (!parsed) parsed = cJSON_CreateObject();
+    cJSON_AddItemToObject(ev, "args", parsed);
+    emit_event(sess, ev);
+    cJSON_Delete(ev);
+}
+
+/* Per executed tool: after execution — the result (§5). */
+static void emit_tool_execution_end(jb_session *sess, const char *id,
+                                    const char *name, const char *result,
+                                    int is_error)
+{
+    cJSON *ev = cJSON_CreateObject();
+    cJSON_AddStringToObject(ev, "type", "tool_execution_end");
+    cJSON_AddStringToObject(ev, "toolCallId", id);
+    cJSON_AddStringToObject(ev, "toolName", name);
+    cJSON *res = cJSON_CreateObject();
+    cJSON *content = cJSON_CreateArray();
+    cJSON *block = cJSON_CreateObject();
+    cJSON_AddStringToObject(block, "type", "text");
+    cJSON_AddStringToObject(block, "text", result ? result : "");
+    cJSON_AddItemToArray(content, block);
+    cJSON_AddItemToObject(res, "content", content);
+    cJSON_AddItemToObject(ev, "result", res);
+    cJSON_AddBoolToObject(ev, "isError", is_error);
+    emit_event(sess, ev);
+    cJSON_Delete(ev);
+}
+
+/* Per text/toolcall delta — the message_update source (§5). */
+static void on_delta(const sse_delta *d, void *userdata)
+{
+    jb_session *sess = userdata;
+    cJSON *ev = cJSON_CreateObject();
+    cJSON_AddStringToObject(ev, "type", "message_update");
+    cJSON *ame = cJSON_CreateObject();
+
+    switch (d->kind) {
+    case SSE_DELTA_TEXT:
+        cJSON_AddStringToObject(ame, "type", "text_delta");
+        cJSON_AddNumberToObject(ame, "contentIndex", d->content_index);
+        cJSON_AddStringToObject(ame, "delta", d->text);
+        break;
+    case SSE_DELTA_TOOLCALL_START:
+        cJSON_AddStringToObject(ame, "type", "toolcall_start");
+        cJSON_AddNumberToObject(ame, "contentIndex", d->content_index);
+        cJSON_AddStringToObject(ame, "id", d->id);
+        cJSON_AddStringToObject(ame, "toolName", d->name);
+        break;
+    case SSE_DELTA_TOOLCALL_DELTA:
+        cJSON_AddStringToObject(ame, "type", "toolcall_delta");
+        cJSON_AddNumberToObject(ame, "contentIndex", d->content_index);
+        cJSON_AddStringToObject(ame, "delta", d->text);
+        break;
+    case SSE_DELTA_TOOLCALL_END: {
+        cJSON_AddStringToObject(ame, "type", "toolcall_end");
+        cJSON_AddNumberToObject(ame, "contentIndex", d->content_index);
+        cJSON *tc = cJSON_CreateObject();
+        cJSON_AddStringToObject(tc, "id", d->id);
+        cJSON_AddStringToObject(tc, "name", d->name);
+        /* Parsed object; unparseable → {} (same rule as §3.4) */
+        cJSON *parsed = cJSON_Parse(d->args ? d->args : "");
+        if (!parsed) parsed = cJSON_CreateObject();
+        cJSON_AddItemToObject(tc, "arguments", parsed);
+        cJSON_AddItemToObject(ame, "toolCall", tc);
+        break;
+    }
+    }
+    cJSON_AddItemToObject(ev, "assistantMessageEvent", ame);
+    emit_event(sess, ev);
+    cJSON_Delete(ev);
 }
 
 /* ---- pi-format message builders (§3.3) ---- */
@@ -736,6 +914,8 @@ static int cmd_run(const char *config_path, const char *argv0, int run_argc, cha
     tools_set_limits(cfg.max_output_lines, cfg.max_output_bytes);
     tools_set_session(sess->uuid);
 
+    emit_agent_start(sess);
+
     /* Agentic loop */
     long total_tokens = 0;
     int max_turns = 50;  /* safety limit */
@@ -752,13 +932,18 @@ static int cmd_run(const char *config_path, const char *argv0, int run_argc, cha
         api_response resp;
         api_response_init(&resp);
 
-        int rc = api_chat_with_retry(&cfg, sys_prompt, messages, tools, &resp);
+        /* The live stream: one pending message per assistant response */
+        emit_message_start(sess, &cfg);
+
+        int rc = api_chat_with_retry(&cfg, sys_prompt, messages, tools, &resp,
+                                     on_delta, sess);
 
         if (rc != 0) {
             /* API error after retries — record it, stop */
             exit_code = 1;
             cJSON *err_msg = assistant_message(&cfg, &resp, "error",
                 resp.text ? resp.text : "API error");
+            emit_message_end(sess, err_msg);
             session_append_message(sess, err_msg);
             cJSON_AddItemToArray(messages, err_msg);
             free(resp.text);
@@ -772,6 +957,7 @@ static int cmd_run(const char *config_path, const char *argv0, int run_argc, cha
             /* Model wants to call tools — pi-format assistant message with
                toolCall blocks, persisted like every other entry */
             cJSON *assistant_msg = assistant_message(&cfg, &resp, "toolUse", NULL);
+            emit_message_end(sess, assistant_msg);
             session_append_message(sess, assistant_msg);
             cJSON_AddItemToArray(messages, assistant_msg);
 
@@ -781,7 +967,8 @@ static int cmd_run(const char *config_path, const char *argv0, int run_argc, cha
                 g_partial_answer = strdup(resp.text);
             }
 
-            /* Execute each tool; each result becomes a toolResult entry */
+            /* Execute each tool; each result becomes a toolResult entry.
+               The live stream shows start → end around the execution. */
             int n_tc = cJSON_GetArraySize(resp.tool_calls_arr);
             for (int i = 0; i < n_tc; i++) {
                 cJSON *tc = cJSON_GetArrayItem(resp.tool_calls_arr, i);
@@ -789,10 +976,15 @@ static int cmd_run(const char *config_path, const char *argv0, int run_argc, cha
                 const char *name = cJSON_GetObjectItemCaseSensitive(tc, "name")->valuestring;
                 const char *args = cJSON_GetObjectItemCaseSensitive(tc, "arguments")->valuestring;
 
+                emit_tool_execution_start(sess, id, name, args);
+
                 char *result = tool_execute(name, args);
+                int is_err = tool_result_is_error(result);
+
+                emit_tool_execution_end(sess, id, name, result, is_err);
 
                 cJSON *tool_msg = tool_result_message(id, name, result,
-                                                      tool_result_is_error(result));
+                                                      is_err);
                 session_append_message(sess, tool_msg);
                 cJSON_AddItemToArray(messages, tool_msg);
                 free(result);
@@ -813,6 +1005,7 @@ static int cmd_run(const char *config_path, const char *argv0, int run_argc, cha
 
         /* Persist the assistant entry — session.jsonl is the record */
         cJSON *final_msg = assistant_message(&cfg, &resp, "stop", NULL);
+        emit_message_end(sess, final_msg);
         session_append_message(sess, final_msg);
         cJSON_AddItemToArray(messages, final_msg);
         free(resp.text);
@@ -820,6 +1013,9 @@ static int cmd_run(const char *config_path, const char *argv0, int run_argc, cha
     }
 
     free(sys_prompt);
+
+    /* The stream's last line: agent_end with the final messages array */
+    emit_agent_end(sess, messages);
 
     /* Write final metadata (status: completed|error) */
     {

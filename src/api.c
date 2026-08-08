@@ -29,6 +29,10 @@ typedef struct {
 
     /* Done flag */
     int done;
+
+    /* Delta callback (§5) — fires per text/toolcall delta */
+    sse_delta_cb delta_cb;
+    void *delta_userdata;
 } sse_state;
 
 /* Points at the active sse_state's text while a stream is in flight — the
@@ -45,6 +49,24 @@ static void sse_state_init(sse_state *st)
     st->text[0] = '\0';
     st->text_len = 0;
     st->tc_array = cJSON_CreateArray();
+}
+
+/* Fire a delta event when a callback is attached. */
+static void delta_fire(sse_state *st, const sse_delta *d)
+{
+    if (st->delta_cb) st->delta_cb(d, st->delta_userdata);
+}
+
+/* Fire the text delta for a content chunk (block 0). */
+static void delta_fire_text(sse_state *st, const char *s)
+{
+    if (!s || !s[0]) return;
+    sse_delta d;
+    memset(&d, 0, sizeof(d));
+    d.kind = SSE_DELTA_TEXT;
+    d.content_index = 0;
+    d.text = s;
+    delta_fire(st, &d);
 }
 
 static void sse_state_free(sse_state *st)
@@ -80,11 +102,56 @@ static cJSON *tc_get_or_create(sse_state *st, int index)
     }
     cJSON *item = cJSON_CreateObject();
     cJSON_AddNumberToObject(item, "_index", index);
+    /* Content index (§5): toolCall blocks come after the text block, in
+       emission order — 0 when no text has been streamed. Computed at
+       creation; providers stream text before tool calls in practice. */
+    cJSON_AddNumberToObject(item, "_cindex", (st->text_len > 0 ? 1 : 0) + index);
     cJSON_AddStringToObject(item, "id", "");
     cJSON_AddStringToObject(item, "name", "");
     cJSON_AddStringToObject(item, "arguments", "");
     cJSON_AddItemToArray(st->tc_array, item);
     return item;
+}
+
+/* Fire toolcall_start on creation (id/name as accumulated so far). */
+static void delta_fire_toolcall_start(sse_state *st, cJSON *tc)
+{
+    sse_delta d;
+    memset(&d, 0, sizeof(d));
+    d.kind = SSE_DELTA_TOOLCALL_START;
+    d.content_index = cJSON_GetObjectItemCaseSensitive(tc, "_cindex")->valueint;
+    d.id = cJSON_GetObjectItemCaseSensitive(tc, "id")->valuestring;
+    d.name = cJSON_GetObjectItemCaseSensitive(tc, "name")->valuestring;
+    d.args = "";
+    delta_fire(st, &d);
+}
+
+/* Fire toolcall_delta for an arguments fragment. */
+static void delta_fire_toolcall_delta(sse_state *st, cJSON *tc, const char *args)
+{
+    if (!args || !args[0]) return;
+    sse_delta d;
+    memset(&d, 0, sizeof(d));
+    d.kind = SSE_DELTA_TOOLCALL_DELTA;
+    d.content_index = cJSON_GetObjectItemCaseSensitive(tc, "_cindex")->valueint;
+    d.id = cJSON_GetObjectItemCaseSensitive(tc, "id")->valuestring;
+    d.name = cJSON_GetObjectItemCaseSensitive(tc, "name")->valuestring;
+    d.text = args;
+    d.args = args;
+    delta_fire(st, &d);
+}
+
+/* Fire toolcall_end for an accumulator at stream end. */
+static void delta_fire_toolcall_end(sse_state *st, cJSON *tc)
+{
+    sse_delta d;
+    memset(&d, 0, sizeof(d));
+    d.kind = SSE_DELTA_TOOLCALL_END;
+    d.content_index = cJSON_GetObjectItemCaseSensitive(tc, "_cindex")->valueint;
+    d.id = cJSON_GetObjectItemCaseSensitive(tc, "id")->valuestring;
+    d.name = cJSON_GetObjectItemCaseSensitive(tc, "name")->valuestring;
+    d.args = cJSON_GetObjectItemCaseSensitive(tc, "arguments")->valuestring;
+    delta_fire(st, &d);
 }
 
 static void tc_accumulate(cJSON *tc, const char *id, const char *name, const char *args)
@@ -130,6 +197,7 @@ static void process_sse_data(sse_state *st, const char *data)
         if (delta) {
             cJSON *content = cJSON_GetObjectItemCaseSensitive(delta, "content");
             if (content && cJSON_IsString(content) && content->valuestring) {
+                delta_fire_text(st, content->valuestring);
                 text_append(st, content->valuestring);
             }
 
@@ -143,6 +211,9 @@ static void process_sse_data(sse_state *st, const char *data)
                     if (idx_j && cJSON_IsNumber(idx_j)) idx = idx_j->valueint;
 
                     cJSON *tc = tc_get_or_create(st, idx);
+                    int fresh = cJSON_GetObjectItemCaseSensitive(tc, "_started") == NULL;
+                    if (fresh)
+                        cJSON_AddTrueToObject(tc, "_started");
 
                     const char *id = NULL;
                     cJSON *id_j = cJSON_GetObjectItemCaseSensitive(tc_delta, "id");
@@ -162,6 +233,8 @@ static void process_sse_data(sse_state *st, const char *data)
                     }
 
                     tc_accumulate(tc, id, name, args);
+                    if (fresh) delta_fire_toolcall_start(st, tc);
+                    if (args && args[0]) delta_fire_toolcall_delta(st, tc, args);
                 }
             }
         }
@@ -341,7 +414,8 @@ void api_response_free(api_response *resp)
 }
 
 int api_chat(const jb_config *cfg, const char *sys_prompt, cJSON *messages,
-             cJSON *tools, api_response *resp)
+             cJSON *tools, api_response *resp, sse_delta_cb on_delta,
+             void *delta_userdata)
 {
     char *body = build_request_body(cfg, sys_prompt, messages, tools);
     if (!body) return -1;
@@ -377,6 +451,8 @@ int api_chat(const jb_config *cfg, const char *sys_prompt, cJSON *messages,
 
     sse_state st;
     sse_state_init(&st);
+    st.delta_cb = on_delta;
+    st.delta_userdata = delta_userdata;
 
     /* Read SSE lines */
     char line[65536];
@@ -423,6 +499,10 @@ int api_chat(const jb_config *cfg, const char *sys_prompt, cJSON *messages,
 
     int curl_status = pclose(fp);
     remove(tmpfile);
+
+    /* Stream over: fire toolcall_end for every accumulated tool call (§5) */
+    for (int i = 0; i < cJSON_GetArraySize(st.tc_array); i++)
+        delta_fire_toolcall_end(&st, cJSON_GetArrayItem(st.tc_array, i));
 
     /* Fill response */
     resp->text = st.text;

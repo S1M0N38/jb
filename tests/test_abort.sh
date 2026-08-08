@@ -102,3 +102,38 @@ if [ -n "$_atxt" ]; then
 else
     skip "abort mid-stream: partial text recorded" "no text streamed before the signal"
 fi
+
+# ---- phase 5: the events stream still closes properly ----
+# The interrupted run emits message_end (aborted) + agent_end — the stream
+# never dangles.
+
+_ev="$_latest/events.jsonl"
+if [ ! -f "$_ev" ]; then
+    fail "abort mid-stream: events.jsonl exists" "missing $_ev"
+    return 0
+fi
+pass "abort mid-stream: events.jsonl exists"
+
+_out=$(python3 -c "
+import json
+lines=[json.loads(l) for l in open('$_ev')]
+types=[l['type'] for l in lines]
+assert 'agent_start' in types, 'no agent_start'
+assert types[-1]=='agent_end', 'last line must be agent_end, got %s' % types[-1]
+me=[l for l in lines if l['type']=='message_end']
+assert me, 'no message_end'
+m=me[-1]['message']
+assert m['role']=='assistant' and m['stopReason']=='aborted', 'last message_end not aborted'
+assert m.get('errorMessage'), 'no errorMessage on aborted message_end'
+si=next(i for i,l in enumerate(lines) if l['type']=='message_start')
+ei=next(i for i,l in enumerate(lines) if l['type']=='message_end')
+ai=next(i for i,l in enumerate(lines) if l['type']=='agent_end')
+assert si<ei<ai, 'order: message_start < message_end < agent_end'
+print('OK', len(lines), 'lines')
+" 2>&1)
+_rc=$?
+if [ "$_rc" -eq 0 ]; then
+    pass "abort mid-stream: message_end (aborted) + agent_end close the stream ($_out)"
+else
+    fail "abort mid-stream: message_end (aborted) + agent_end close the stream" "$_out"
+fi
