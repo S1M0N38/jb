@@ -21,11 +21,13 @@ case "$_out" in
     *"jb: waiting for 21637177…"*) pass "jb wait prints the waiting line to stderr" ;;
     *) fail "jb wait prints the waiting line to stderr" "got: $_out" ;;
 esac
-# stdout is silent
-case "$_out" in
-    *"$'\n'"*) fail "jb wait keeps stdout silent" "got: $_out" ;;
-    *) pass "jb wait keeps stdout silent" ;;
-esac
+# stdout is silent (captured separately — no $'...' quoting)
+_so=$("$JB" wait "$_uuid" 2>/dev/null)
+if [ -z "$_so" ]; then
+    pass "jb wait keeps stdout silent"
+else
+    fail "jb wait keeps stdout silent" "got: $_so"
+fi
 
 # error status → exit 1
 fixture_session "b3586600a1b2c3d4e5f60718293a4b5c7" error "failed run"

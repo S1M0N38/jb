@@ -1,5 +1,6 @@
-/* meta.h — phase 6 metadata verbs: status, log, show, ps, wait, path, config.
-   All read-only over .jb/sessions/<uuid>/metadata.json — no API calls. */
+/* meta.h — phase 6 verbs: status, log, show, ps, wait, path, config.
+   The metadata verbs read .jb/sessions/<uuid>/metadata.json (no API
+   calls); cmd_config mirrors the global/local config files. */
 #ifndef JB_META_H
 #define JB_META_H
 
@@ -21,6 +22,9 @@ int jb_find_repo(const char *start, char *out, size_t outlen);
    failure, else 0 with the full uuid in out. */
 int jb_resolve_id_arg(const char *repo_root, const char *arg,
                       char *out, size_t outlen);
+
+/* mkdir -p for a single path (all intermediate components) */
+int mkdirs(const char *path);
 
 /* jb path ID — print the absolute session directory. 0 · 1 not found · 2 usage */
 int cmd_path(const char *id_arg);

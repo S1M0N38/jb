@@ -6,9 +6,9 @@
 repo_init
 
 # committed forest: A(root) → B(fork), C(fork, error); D(root) → E(fork);
-# F(fresh: parent X is not committed). G(working) and X(completed) are
-# absent from the graph. start_ago: A=600 B=550 C=500 D=400 E=350 F=300
-# G=200 X=150 (smaller = newer).
+# F(fresh: spawned by A, no --fork parent). G(working) and X(completed)
+# are absent from the graph. start_ago: A=600 B=550 C=500 D=400 E=350
+# F=300 G=200 X=150 (smaller = newer).
 _a="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 _b="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 _c="cccccccccccccccccccccccccccccccc"
@@ -22,7 +22,7 @@ fixture_session "$_b" committed "fork B subject" "$_a" "$_a" 550
 fixture_session "$_c" committed "fork C subject" "$_a" "$_a" 500 1
 fixture_session "$_d" committed "root D subject" "" "" 400
 fixture_session "$_e" committed "fork E subject" "$_d" "$_d" 350
-fixture_session "$_f" committed "fresh F subject" "" "$_x" 300
+fixture_session "$_f" committed "fresh F subject" "$_a" "" 300
 fixture_session "$_g" working "working G" "$_a" "$_a" 200
 fixture_session "$_x" completed "completed X" "" "" 150
 
@@ -90,10 +90,10 @@ fi
 # exact tree shape (fixtures are deterministic)
 _exp="aaaaaaaa  root  \"root A subject\"
 ├── bbbbbbbb  fork  \"fork B subject\"
-└── cccccccc  [error]  fork  \"fork C subject\"
+├── cccccccc  [error]  fork  \"fork C subject\"
+└── ffffffff  fresh  \"fresh F subject\"
 dddddddd  root  \"root D subject\"
-└── eeeeeeee  fork  \"fork E subject\"
-ffffffff  fresh  \"fresh F subject\""
+└── eeeeeeee  fork  \"fork E subject\""
 if [ "$_gout" = "$_exp" ]; then
     pass "jb log --graph renders the committed forest"
 else

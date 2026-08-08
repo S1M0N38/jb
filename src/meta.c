@@ -1,6 +1,7 @@
 /* meta.c — phase 6 metadata verbs: status, log, show, ps, wait, path, config.
    Metadata-only: reads .jb/sessions/<uuid>/metadata.json, no API calls. */
 #include "meta.h"
+#include "config.h"
 #include "session.h"
 
 #include <dirent.h>
@@ -68,6 +69,24 @@ int jb_resolve_id_arg(const char *repo_root, const char *arg,
     else
         fprintf(stderr, "jb: %s\n", err);
     return -1;
+}
+
+/* mkdirs — mkdir -p for a single path (all intermediate components) */
+int mkdirs(const char *path)
+{
+    char tmp[4096];
+    strncpy(tmp, path, sizeof(tmp) - 1);
+    tmp[sizeof(tmp) - 1] = '\0';
+
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(tmp, 0755);
+            *p = '/';
+        }
+    }
+    mkdir(tmp, 0755);
+    return 0;
 }
 
 /* require_repo — resolve the enclosing repo or print the fatal and return
@@ -293,12 +312,26 @@ static int session_list_scan(const char *repo_root, session_list *list)
 }
 
 /* rec_age_ms — the age anchor: started_at while working, ended_at once
-   terminal (completed/committed/error). */
-static long long rec_age_ms(const session_rec *rec)
+   terminal (completed/committed/error). Callers compute now - anchor. */
+static long long rec_age_anchor_ms(const session_rec *rec)
 {
     if (strcmp(rec->status, "working") == 0 || !rec->has_ended)
         return rec->started_ms;
     return rec->ended_ms;
+}
+
+/* children_of — split the sessions authored by `author` into pending and
+   committed lists (the ps/status children view). */
+static void children_of(const session_list *list, const char *author,
+                        session_list *pending, session_list *committed)
+{
+    for (int i = 0; i < list->n; i++) {
+        if (strcmp(list->items[i].author, author) != 0) continue;
+        if (strcmp(list->items[i].status, "committed") == 0)
+            session_list_add(committed, &list->items[i]);
+        else
+            session_list_add(pending, &list->items[i]);
+    }
 }
 
 static int cmp_started_desc(const void *a, const void *b)
@@ -370,11 +403,11 @@ int cmd_status(void)
         id8(self_rec->uuid, sid, sizeof(sid));
         if (strcmp(self_rec->status, "working") == 0) {
             char a[32];
-            age_short(now, rec_age_ms(self_rec), a, sizeof(a));
+            age_short(now, rec_age_anchor_ms(self_rec), a, sizeof(a));
             snprintf(age, sizeof(age), "· %s", a);
         } else {
             char a[32];
-            age_short(now, rec_age_ms(self_rec), a, sizeof(a));
+            age_short(now, rec_age_anchor_ms(self_rec), a, sizeof(a));
             snprintf(age, sizeof(age), "· ended %s ago", a);
         }
         printf("session %s  (%s)  \"%s\" %s\n", sid, self_rec->status,
@@ -382,20 +415,14 @@ int cmd_status(void)
 
         /* children: pending (ps format) then committed count */
         session_list pending = {0}, committed = {0};
-        for (int i = 0; i < list.n; i++) {
-            if (strcmp(list.items[i].author, self) != 0) continue;
-            if (strcmp(list.items[i].status, "committed") == 0)
-                session_list_add(&committed, &list.items[i]);
-            else
-                session_list_add(&pending, &list.items[i]);
-        }
+        children_of(&list, self, &pending, &committed);
         if (pending.n + committed.n > 0) {
             qsort(pending.items, (size_t)pending.n, sizeof(*pending.items), cmp_started_desc);
             printf("children: %d\n", pending.n);
             for (int i = 0; i < pending.n; i++) {
                 char cid[9], age2[32];
                 id8(pending.items[i].uuid, cid, sizeof(cid));
-                age_mmss(now, rec_age_ms(&pending.items[i]), age2, sizeof(age2));
+                age_mmss(now, rec_age_anchor_ms(&pending.items[i]), age2, sizeof(age2));
                 printf("  %s  %s  %s  \"%s\"\n", cid, pending.items[i].status,
                        age2, pending.items[i].subject);
             }
@@ -490,7 +517,7 @@ int cmd_log(const char *graph_arg)
             id8(r->uuid, sid, sizeof(sid));
             if (r->author[0]) id8(r->author, author, sizeof(author));
             else snprintf(author, sizeof(author), "-");
-            age_short(now, rec_age_ms(r), age, sizeof(age));
+            age_short(now, rec_age_anchor_ms(r), age, sizeof(age));
             subject_trunc(r->subject, subj, sizeof(subj));
             printf("%s\t%s\t%s\t%s\t%s\n", sid, r->status, author, age, subj);
         }
@@ -499,8 +526,9 @@ int cmd_log(const char *graph_arg)
     }
 
     /* graph: committed nodes only, linked to their nearest committed
-       ancestor. kind: root (no parent) / fork (parent committed) /
-       fresh (parent exists but is not committed). */
+       ancestor (fork) or their committed author (fresh). kind: root
+       (no parent, no author) / fork (continuation) / fresh (new
+       context — spawned by a session, no --fork parent). */
     enum { KIND_ROOT, KIND_FORK, KIND_FRESH };
     typedef struct {
         session_rec *rec;
@@ -522,32 +550,41 @@ int cmd_log(const char *graph_arg)
     }
 
     for (int i = 0; i < ni; i++) {
-        /* walk parent pointers to the nearest committed ancestor */
-        const char *p = nodes[i].rec->parent;
-        int ancestor = -1;
-        int guard = 0;
-        while (p[0] && guard++ < 64) {
-            int idx = find_session(&list, p);
-            if (idx < 0) break;                 /* chain ends */
-            if (strcmp(list.items[idx].status, "committed") == 0) {
-                ancestor = idx;
-                break;
+        /* kind by origin (cli.html): fork = continuation (parent set),
+           fresh = new context (no parent, spawned by a session), root =
+           human run (no parent, no author). */
+        nodes[i].kind = nodes[i].rec->parent[0]
+                            ? KIND_FORK
+                            : (nodes[i].rec->author[0] ? KIND_FRESH : KIND_ROOT);
+        /* attach: a fork hangs under its nearest committed ancestor; a
+           fresh hangs under its author's node (the spawner) when the
+           author is itself committed. */
+        int attach = -1;
+        if (nodes[i].kind == KIND_FORK) {
+            const char *p = nodes[i].rec->parent;
+            int guard = 0;
+            while (p[0] && guard++ < 64) {
+                int idx = find_session(&list, p);
+                if (idx < 0) break;             /* chain ends */
+                if (strcmp(list.items[idx].status, "committed") == 0) {
+                    attach = idx;
+                    break;
+                }
+                p = list.items[idx].parent;     /* keep walking */
             }
-            p = list.items[idx].parent;         /* keep walking */
+        } else if (nodes[i].kind == KIND_FRESH) {
+            attach = find_session(&list, nodes[i].rec->author);
+            if (attach >= 0
+                && strcmp(list.items[attach].status, "committed") != 0)
+                attach = -1;
         }
-        if (ancestor >= 0) {
-            /* parent index in nodes[] — the ancestor's own node */
+        if (attach >= 0) {
             for (int j = 0; j < ni; j++) {
-                if (nodes[j].rec == &list.items[ancestor]) {
+                if (nodes[j].rec == &list.items[attach]) {
                     nodes[i].parent = j;
                     break;
                 }
             }
-            nodes[i].kind = (strcmp(nodes[i].rec->parent,
-                                     list.items[ancestor].uuid) == 0)
-                                ? KIND_FORK : KIND_FRESH;
-        } else {
-            nodes[i].kind = nodes[i].rec->parent[0] ? KIND_FRESH : KIND_ROOT;
         }
     }
 
@@ -665,13 +702,7 @@ int cmd_ps(void)
     session_list_scan(repo_root, &list);
 
     session_list pending = {0}, committed = {0};
-    for (int i = 0; i < list.n; i++) {
-        if (strcmp(list.items[i].author, self) != 0) continue;
-        if (strcmp(list.items[i].status, "committed") == 0)
-            session_list_add(&committed, &list.items[i]);
-        else
-            session_list_add(&pending, &list.items[i]);
-    }
+    children_of(&list, self, &pending, &committed);
     qsort(pending.items, (size_t)pending.n, sizeof(*pending.items), cmp_started_desc);
 
     long long now = jb_epoch_ms();
@@ -679,7 +710,7 @@ int cmd_ps(void)
         session_rec *r = &pending.items[i];
         char sid[9], age[32];
         id8(r->uuid, sid, sizeof(sid));
-        age_mmss(now, rec_age_ms(r), age, sizeof(age));
+        age_mmss(now, rec_age_anchor_ms(r), age, sizeof(age));
         printf("%s\t%s\t%s\t\"%s\"\n", sid, r->status, age, r->subject);
     }
     if (committed.n > 0)
@@ -798,6 +829,16 @@ int cmd_config(int argc, char **argv)
             fprintf(stderr, "jb: fatal: not a jb repository (run 'jb init')\n");
             return 1;
         }
+        /* the global dir may not exist yet — create it (git config
+           creates ~/.gitconfig's directory on demand too) */
+        char dir[4096];
+        snprintf(dir, sizeof(dir), "%s", path);
+        char *slash = strrchr(dir, '/');
+        if (slash) {
+            *slash = '\0';
+            if (dir[0]) mkdirs(dir);
+        }
+
         cJSON *root = NULL;
         char *json = read_file(path);
         if (json) {
@@ -816,8 +857,10 @@ int cmd_config(int argc, char **argv)
             fputs(out, f);
             fclose(f);
             if (rename(tmp, path) == 0) rc = 0;
-        } else if (f) {
-            fclose(f);
+            else fprintf(stderr, "jb: %s: cannot write config\n", path);
+        } else {
+            if (f) fclose(f);
+            fprintf(stderr, "jb: %s: cannot write config\n", path);
         }
         free(out);
         cJSON_Delete(root);

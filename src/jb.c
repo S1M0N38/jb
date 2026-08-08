@@ -202,23 +202,6 @@ static void cmd_help(const char *verb)
    (phase 6: shared by the metadata verbs) — see meta.h */
 
 /* mkdir -p for a single path (all intermediate components) */
-static int mkdirs(const char *path)
-{
-    char tmp[4096];
-    strncpy(tmp, path, sizeof(tmp) - 1);
-    tmp[sizeof(tmp) - 1] = '\0';
-
-    for (char *p = tmp + 1; *p; p++) {
-        if (*p == '/') {
-            *p = '\0';
-            mkdir(tmp, 0755);
-            *p = '/';
-        }
-    }
-    mkdir(tmp, 0755);
-    return 0;
-}
-
 /* cmd_init — create .jb/ with sessions/ and an empty local config */
 static int cmd_init(void)
 {
@@ -674,9 +657,17 @@ int main(int argc, char **argv)
         return cmd_show(verb_arg);
     }
     if (strcmp(verb, "ps") == 0) {
+        if (verb_arg) {
+            fprintf(stderr, "jb: 'ps' takes no arguments\n");
+            return 2;
+        }
         return cmd_ps();
     }
     if (strcmp(verb, "status") == 0) {
+        if (verb_arg) {
+            fprintf(stderr, "jb: 'status' takes no arguments\n");
+            return 2;
+        }
         return cmd_status();
     }
     if (strcmp(verb, "log") == 0) {
