@@ -1,126 +1,122 @@
-# test_metadata.sh — Session metadata.json feature
+# test_metadata.sh — metadata.json: the jb index for a session (§6)
 
-# Run jb and verify metadata.json is created in session dir
-_output=$(echo "say OK" | "$JB" 2>/dev/null)
-
-_cache_dir="$JB_SESSIONS_DIR"
+repo_init
+prompt_pong | "$JB" run >/dev/null 2>&1
 _latest=$(newest_session)
-
 if [ -z "$_latest" ]; then
-    fail "metadata.json created" "no session dir found"
+    fail "metadata.json checks" "no session dir found"
+    return 0   # sourced by run.sh — return, never exit
+fi
+_meta="$_latest/metadata.json"
+_uuid=$(basename "$_latest")
+
+assert_file_exists "metadata.json created" "$_meta"
+
+# Valid JSON
+if jq empty "$_meta" >/dev/null 2>&1; then
+    pass "metadata.json is valid JSON"
 else
-    # metadata.json must exist
-    assert_file_exists "metadata.json created" "$_latest/metadata.json"
-
-    # Must be valid JSON
-    if command -v jq >/dev/null 2>&1; then
-        _meta=$(cat "$_latest/metadata.json" 2>/dev/null)
-        _valid=$(printf '%s' "$_meta" | jq empty 2>&1)
-        if [ $? -eq 0 ]; then
-            pass "metadata.json is valid JSON"
-        else
-            fail "metadata.json is valid JSON" "$_valid"
-        fi
-
-        # Required fields present
-        _has_uuid=$(printf '%s' "$_meta" | jq -r '.uuid // empty' 2>/dev/null)
-        if [ -n "$_has_uuid" ]; then
-            pass "metadata has uuid field"
-        else
-            fail "metadata has uuid field" "missing"
-        fi
-
-        _has_status=$(printf '%s' "$_meta" | jq -r '.status // empty' 2>/dev/null)
-        if [ -n "$_has_status" ]; then
-            pass "metadata has status field"
-        else
-            fail "metadata has status field" "missing"
-        fi
-
-        _has_title=$(printf '%s' "$_meta" | jq -r '.title // empty' 2>/dev/null)
-        if [ -n "$_has_title" ]; then
-            pass "metadata has title field"
-        else
-            fail "metadata has title field" "missing"
-        fi
-
-        _has_started=$(printf '%s' "$_meta" | jq -r '.started_at // empty' 2>/dev/null)
-        if [ -n "$_has_started" ]; then
-            pass "metadata has started_at field"
-        else
-            fail "metadata has started_at field" "missing"
-        fi
-
-        _has_model=$(printf '%s' "$_meta" | jq -r '.config.model // empty' 2>/dev/null)
-        if [ -n "$_has_model" ]; then
-            pass "metadata has config.model field"
-        else
-            fail "metadata has config.model field" "missing"
-        fi
-
-        _has_working_dir=$(printf '%s' "$_meta" | jq -r '.working_dir // empty' 2>/dev/null)
-        if [ -n "$_has_working_dir" ]; then
-            pass "metadata has working_dir field"
-        else
-            fail "metadata has working_dir field" "missing"
-        fi
-
-        # Close-phase fields (final metadata overwrite)
-        _has_ended=$(printf '%s' "$_meta" | jq -r '.ended_at // empty' 2>/dev/null)
-        if [ -n "$_has_ended" ]; then
-            pass "metadata has ended_at field"
-        else
-            fail "metadata has ended_at field" "missing"
-        fi
-
-        _tokens=$(printf '%s' "$_meta" | jq -r '.tokens_used // empty' 2>/dev/null)
-        if [ -n "$_tokens" ]; then
-            pass "metadata has tokens_used field"
-        else
-            fail "metadata has tokens_used field" "missing"
-        fi
-
-        _turns=$(printf '%s' "$_meta" | jq -r '.turns // empty' 2>/dev/null)
-        if [ -n "$_turns" ]; then
-            pass "metadata has turns field"
-        else
-            fail "metadata has turns field" "missing"
-        fi
-
-        _exit_code=$(printf '%s' "$_meta" | jq -r '.exit_code // empty' 2>/dev/null)
-        if [ -n "$_exit_code" ]; then
-            pass "metadata has exit_code field"
-        else
-            fail "metadata has exit_code field" "missing"
-        fi
-
-        # Status should be 'completed' for successful run
-        _status_val=$(printf '%s' "$_meta" | jq -r '.status // empty' 2>/dev/null)
-        if [ "$_status_val" = "completed" ]; then
-            pass "metadata status is 'completed' on success"
-        else
-            fail "metadata status is 'completed' on success" "got: $_status_val"
-        fi
-    fi
+    fail "metadata.json is valid JSON" "$(cat "$_meta")"
 fi
 
-# --- Title truncation test ---
-_long_prompt="This is a very long prompt that exceeds the sixty character limit for titles and should be truncated"
-_output2=$(printf '%s' "$_long_prompt" | "$JB" 2>/dev/null)
+# uuid matches the session dir
+_u=$(jq -r '.uuid // empty' "$_meta" 2>/dev/null)
+if [ "$_u" = "$_uuid" ]; then
+    pass "metadata uuid matches dir"
+else
+    fail "metadata uuid matches dir" "meta=$_u dir=$_uuid"
+fi
 
-_latest2=$(newest_session)
-if [ -n "$_latest2" ] && [ -f "$_latest2/metadata.json" ]; then
-    _title2=$(jq -r '.title // empty' "$_latest2/metadata.json" 2>/dev/null)
-    _title_len=${#_title2}
-    # Title should be truncated (~64 chars max with ellipsis)
-    if [ "$_title_len" -le 64 ]; then
-        pass "title is truncated to ~64 chars (got $_title_len)"
+# status: completed after a successful run (working at init — see lifecycle)
+_s=$(jq -r '.status // empty' "$_meta" 2>/dev/null)
+if [ "$_s" = "completed" ]; then
+    pass "metadata status is completed"
+else
+    fail "metadata status is completed" "got: $_s"
+fi
+
+# subject = prompt first line
+_sub=$(jq -r '.subject // empty' "$_meta" 2>/dev/null)
+case "$_sub" in
+    *PONG*) pass "subject is the prompt first line" ;;
+    *)      fail "subject is the prompt first line" "got: $_sub" ;;
+esac
+
+# body is "" until commit
+_b=$(jq -r '.body // empty' "$_meta" 2>/dev/null)
+if [ -z "$_b" ]; then
+    pass "body empty until commit"
+else
+    fail "body empty until commit" "got: $_b"
+fi
+
+# author is "" for a human run (no $JB_SESSION)
+_a=$(jq -r '.author // empty' "$_meta" 2>/dev/null)
+if [ -z "$_a" ]; then
+    pass "author empty for human runs"
+else
+    fail "author empty for human runs" "got: $_a"
+fi
+
+# started_at / ended_at are ISO timestamps
+case "$(jq -r '.started_at // empty' "$_meta" 2>/dev/null)" in
+    *T*Z) pass "started_at is ISO timestamp" ;;
+    *)    fail "started_at is ISO timestamp" "got: $(jq -r '.started_at' "$_meta" 2>/dev/null)" ;;
+esac
+case "$(jq -r '.ended_at // empty' "$_meta" 2>/dev/null)" in
+    *T*Z) pass "ended_at is ISO timestamp" ;;
+    *)    fail "ended_at is ISO timestamp" "got: $(jq -r '.ended_at' "$_meta" 2>/dev/null)" ;;
+esac
+
+# working_dir is the repo cwd (compare canonical: /var -> /private/var on macOS)
+_wd=$(jq -r '.working_dir // empty' "$_meta" 2>/dev/null)
+_phys=$(cd "$SCRATCH" && pwd -P)
+if [ "$_wd" = "$_phys" ]; then
+    pass "working_dir matches the run cwd"
+else
+    fail "working_dir matches the run cwd" "meta=$_wd cwd=$_phys"
+fi
+
+# config snapshot matches the real provider config
+_real_model=$(jq -r '.model // empty' "$REAL_CFG" 2>/dev/null)
+_meta_model=$(jq -r '.config.model // empty' "$_meta" 2>/dev/null)
+if [ -n "$_real_model" ] && [ "$_meta_model" = "$_real_model" ]; then
+    pass "config snapshot: model matches"
+else
+    fail "config snapshot: model matches" "expected $_real_model, got $_meta_model"
+fi
+for _k in api_url max_tokens max_output_lines max_output_bytes; do
+    if jq -e ".config.$_k != null" "$_meta" >/dev/null 2>&1; then
+        pass "config snapshot has $_k"
     else
-        fail "title is truncated to ~64 chars" "too long: $_title_len"
+        fail "config snapshot has $_k" "missing"
     fi
-    # Truncated title should end with ... 
-    case "$_title2" in
-        *"...") pass "truncated title ends with ellipsis" ;;
-        *)      fail "truncated title ends with ellipsis" "got: $_title2" ;;
-    esac
+done
+
+# counters from the close write
+_t=$(jq -r '.turns // empty' "$_meta" 2>/dev/null)
+if [ "$_t" -ge 1 ] 2>/dev/null; then
+    pass "turns recorded (>= 1)"
+else
+    fail "turns recorded (>= 1)" "got: $_t"
+fi
+_tok=$(jq -r '.tokens_used // empty' "$_meta" 2>/dev/null)
+if [ -n "$_tok" ]; then
+    pass "tokens_used recorded"
+else
+    fail "tokens_used recorded" "missing"
+fi
+_ec=$(jq -r '.exit_code // empty' "$_meta" 2>/dev/null)
+if [ "$_ec" = "0" ]; then
+    pass "exit_code 0 recorded"
+else
+    fail "exit_code 0 recorded" "got: $_ec"
+fi
+
+# last_activity present (heartbeat field)
+_la=$(jq -r '.last_activity // empty' "$_meta" 2>/dev/null)
+if [ -n "$_la" ]; then
+    pass "last_activity present"
+else
+    fail "last_activity present" "missing"
 fi

@@ -596,29 +596,30 @@ static char *tool_jb(const char *arguments)
     fwrite(prompt, 1, strlen(prompt), tf);
     fclose(tf);
 
-    /* Build command: cat tempfile | <jb-path> [--config <path>] --seed <uuid> */
+    /* Build command: cat tempfile | <jb-path> [--config <path>] run
+       (lineage travels via the inherited $JB_SESSION env) */
     char full_cmd[12288];
     const char *config_arg = g_config_path[0] ? g_config_path : NULL;
 
     if (timeout > 0) {
         if (config_arg) {
             snprintf(full_cmd, sizeof(full_cmd),
-                "timeout %d /bin/sh -c 'cat %s | %s --config %s --seed %s' 2>&1",
-                timeout, tmpfile, g_jb_path, config_arg, g_session_uuid);
+                "timeout %d /bin/sh -c 'cat %s | %s --config %s run' 2>&1",
+                timeout, tmpfile, g_jb_path, config_arg);
         } else {
             snprintf(full_cmd, sizeof(full_cmd),
-                "timeout %d /bin/sh -c 'cat %s | %s --seed %s' 2>&1",
-                timeout, tmpfile, g_jb_path, g_session_uuid);
+                "timeout %d /bin/sh -c 'cat %s | %s run' 2>&1",
+                timeout, tmpfile, g_jb_path);
         }
     } else {
         if (config_arg) {
             snprintf(full_cmd, sizeof(full_cmd),
-                "cat %s | %s --config %s --seed %s 2>&1",
-                tmpfile, g_jb_path, config_arg, g_session_uuid);
+                "cat %s | %s --config %s run 2>&1",
+                tmpfile, g_jb_path, config_arg);
         } else {
             snprintf(full_cmd, sizeof(full_cmd),
-                "cat %s | %s --seed %s 2>&1",
-                tmpfile, g_jb_path, g_session_uuid);
+                "cat %s | %s run 2>&1",
+                tmpfile, g_jb_path);
         }
     }
 

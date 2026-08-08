@@ -1,4 +1,4 @@
-/* session.c — session state management (UUID, dirs, JSONL files) */
+/* session.c — session storage: .jb/sessions/<uuid>/{metadata,session,events}.json */
 #include "session.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -6,22 +6,6 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <time.h>
-
-static const char *xdg_cache_home(void)
-{
-    const char *xdg = getenv("XDG_CACHE_HOME");
-    if (xdg && xdg[0]) return xdg;
-    static char buf[4096];
-    snprintf(buf, sizeof(buf), "%s/.cache", getenv("HOME"));
-    return buf;
-}
-
-/* Resolve the path of another session's file (e.g. state.jsonl). */
-static int session_file_path(const char *uuid, const char *file, char *out, size_t outlen)
-{
-    snprintf(out, outlen, "%s/jb/sessions/%s/%s", xdg_cache_home(), uuid, file);
-    return 0;
-}
 
 static int generate_uuid(char *out, size_t outlen)
 {
@@ -67,22 +51,21 @@ static int mkdirs(const char *path)
     return 0;
 }
 
-int session_init(jb_session *sess)
+int session_init(jb_session *sess, const char *repo_root)
 {
     memset(sess, 0, sizeof(*sess));
-    sess->parent[0] = '\0';
 
     if (generate_uuid(sess->uuid, sizeof(sess->uuid)) != 0)
         return -1;
 
     snprintf(sess->session_dir, sizeof(sess->session_dir),
-        "%s/jb/sessions/%s", xdg_cache_home(), sess->uuid);
+        "%s/.jb/sessions/%s", repo_root, sess->uuid);
 
-    snprintf(sess->state_path, sizeof(sess->state_path),
-        "%s/state.jsonl", sess->session_dir);
+    snprintf(sess->session_path, sizeof(sess->session_path),
+        "%s/session.jsonl", sess->session_dir);
 
-    snprintf(sess->log_path, sizeof(sess->log_path),
-        "%s/log.jsonl", sess->session_dir);
+    snprintf(sess->events_path, sizeof(sess->events_path),
+        "%s/events.jsonl", sess->session_dir);
 
     snprintf(sess->metadata_path, sizeof(sess->metadata_path),
         "%s/metadata.json", sess->session_dir);
@@ -91,232 +74,192 @@ int session_init(jb_session *sess)
     if (mkdirs(sess->session_dir) != 0)
         return -1;
 
-    /* Open log file for appending */
-    sess->log_fp = fopen(sess->log_path, "a");
-    if (!sess->log_fp) return -1;
+    /* Open the conversation file for appending */
+    sess->session_fp = fopen(sess->session_path, "a");
+    if (!sess->session_fp) return -1;
 
-    /* Open state file for appending */
-    sess->state_fp = fopen(sess->state_path, "a");
-    if (!sess->state_fp) {
-        fclose(sess->log_fp);
+    /* Open the events stream for appending */
+    sess->events_fp = fopen(sess->events_path, "a");
+    if (!sess->events_fp) {
+        fclose(sess->session_fp);
+        sess->session_fp = NULL;
         return -1;
     }
 
     return 0;
 }
 
-int session_append_state(jb_session *sess, const char *json_line)
+int session_append_pi(jb_session *sess, const char *json_line)
 {
-    if (!sess->state_fp) return -1;
-    fprintf(sess->state_fp, "%s\n", json_line);
-    fflush(sess->state_fp);
+    if (!sess->session_fp) return -1;
+    fprintf(sess->session_fp, "%s\n", json_line);
+    fflush(sess->session_fp);
     return 0;
 }
 
-int session_append_log(jb_session *sess, const char *line)
+int session_append_event(jb_session *sess, const char *json_line)
 {
-    if (!sess->log_fp) return -1;
-    fprintf(sess->log_fp, "%s\n", line);
-    fflush(sess->log_fp);
+    if (!sess->events_fp) return -1;
+    fprintf(sess->events_fp, "%s\n", json_line);
+    fflush(sess->events_fp);
     return 0;
 }
 
-void session_set_parent(jb_session *sess, const char *parent_uuid)
+void session_set_author(jb_session *sess, const char *author)
 {
-    if (parent_uuid && parent_uuid[0]) {
-        strncpy(sess->parent, parent_uuid, JB_UUID_LEN - 1);
-        sess->parent[JB_UUID_LEN - 1] = '\0';
+    if (author && author[0]) {
+        strncpy(sess->author, author, JB_UUID_LEN - 1);
+        sess->author[JB_UUID_LEN - 1] = '\0';
     }
 }
 
-void session_set_spawned_from(jb_session *sess, const char *source_uuid)
+int session_write_header(jb_session *sess, const char *cwd)
 {
-    if (source_uuid && source_uuid[0]) {
-        strncpy(sess->spawned_from, source_uuid, JB_UUID_LEN - 1);
-        sess->spawned_from[JB_UUID_LEN - 1] = '\0';
-    }
+    cJSON *h = cJSON_CreateObject();
+    if (!h) return -1;
+
+    char ts[40];
+    jb_iso8601_ms(ts, sizeof(ts));
+
+    cJSON_AddStringToObject(h, "type", "session");
+    cJSON_AddNumberToObject(h, "version", 3);
+    cJSON_AddStringToObject(h, "id", sess->uuid);
+    cJSON_AddStringToObject(h, "timestamp", ts);
+    cJSON_AddStringToObject(h, "cwd", cwd);
+
+    char *s = cJSON_PrintUnformatted(h);
+    cJSON_Delete(h);
+    if (!s) return -1;
+
+    int rc = session_append_pi(sess, s);
+    if (rc == 0) rc = session_append_event(sess, s);
+    free(s);
+    return rc;
 }
 
-int session_load_state(cJSON *messages, const char *source_uuid)
+/* ---- Timestamps ---- */
+
+void jb_id8(char *out, size_t outlen)
 {
-    char path[4096];
-    session_file_path(source_uuid, "state.jsonl", path, sizeof(path));
-
-    FILE *f = fopen(path, "r");
-    if (!f) return -1;
-
-    char line[65536];
-    cJSON *last_good = NULL;  /* last assistant message without tool_calls */
-    int n = 0;
-    while (fgets(line, sizeof(line), f)) {
-        line[strcspn(line, "\r\n")] = '\0';
-        if (!line[0]) continue;
-        cJSON *obj = cJSON_Parse(line);
-        if (!obj) continue;
-        cJSON_AddItemToArray(messages, obj);
-        n++;
-        cJSON *role = cJSON_GetObjectItemCaseSensitive(obj, "role");
-        cJSON *tc   = cJSON_GetObjectItemCaseSensitive(obj, "tool_calls");
-        if (role && cJSON_IsString(role) &&
-            strcmp(role->valuestring, "assistant") == 0 && !tc) {
-            last_good = obj;
-        }
+    FILE *f = fopen("/dev/urandom", "rb");
+    unsigned char b[4];
+    if (!f || fread(b, 1, 4, f) != 4) {
+        if (f) fclose(f);
+        snprintf(out, outlen, "%08lx", (unsigned long)rand());
+        return;
     }
     fclose(f);
-
-    if (n == 0) return -1;
-
-    /* Trim dangling tail: drop everything after last_good (unpaired tool
-       calls or tool results from an interrupted source session). */
-    if (last_good) {
-        int keep = 0, i = 0;
-        for (cJSON *c = messages->child; c; c = c->next, i++) {
-            if (c == last_good) keep = i;
-        }
-        while (cJSON_GetArraySize(messages) > keep + 1) {
-            cJSON_DeleteItemFromArray(messages, keep + 1);
-        }
-    }
-    return 0;
+    snprintf(out, outlen, "%02x%02x%02x%02x", b[0], b[1], b[2], b[3]);
 }
 
-void session_close(jb_session *sess)
-{
-    if (sess->log_fp) { fclose(sess->log_fp); sess->log_fp = NULL; }
-    if (sess->state_fp) { fclose(sess->state_fp); sess->state_fp = NULL; }
-}
-
-/* ---- Helpers ---- */
-
-/* Generate ISO 8601 UTC timestamp: "2026-05-25T20:12:00Z" */
-static void iso8601_now(char *out, size_t outlen)
+void jb_iso8601_ms(char *out, size_t outlen)
 {
     time_t now = time(NULL);
     struct tm *gmt = gmtime(&now);
-    strftime(out, outlen, "%Y-%m-%dT%H:%M:%SZ", gmt);
+    /* strftime "%Y-%m-%dT%H:%M:%S" + ".%03ldZ" */
+    strftime(out, outlen - 8, "%Y-%m-%dT%H:%M:%S", gmt);
+    size_t len = strlen(out);
+    snprintf(out + len, outlen - len, ".%03ldZ", now % 1000);
 }
 
-/* Truncate prompt to ~60 chars at word boundary for title */
-static void make_title(const char *prompt, char *out, size_t outlen)
+long jb_epoch_ms(void)
 {
-    size_t max = 60;
-    /* Take first line only */
-    const char *nl = strchr(prompt, '\n');
-    size_t len = nl ? (size_t)(nl - prompt) : strlen(prompt);
-
-    if (len <= max) {
-        snprintf(out, outlen, "%.*s", (int)len, prompt);
-        return;
-    }
-
-    /* Cut at word boundary */
-    size_t cut = max;
-    while (cut > 0 && prompt[cut] != ' ') cut--;
-    if (cut == 0) cut = max;  /* no space found, hard cut */
-
-    snprintf(out, outlen, "%.*s...", (int)cut, prompt);
+    return (long)time(NULL) * 1000L;
 }
 
-/* Write metadata.json to session directory */
+/* ---- Metadata (the jb index) ---- */
+
+/* Atomic write: temp file + rename — readers never see a partial file */
 static int write_metadata_file(const char *path, const char *json)
 {
-    FILE *f = fopen(path, "w");
+    char tmp[4300];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    FILE *f = fopen(tmp, "w");
     if (!f) return -1;
     fprintf(f, "%s\n", json);
     fclose(f);
-    return 0;
+    return rename(tmp, path);
+}
+
+/* Subject: the prompt's first line, capped at the buffer size */
+static void make_subject(const char *prompt, char *out, size_t outlen)
+{
+    const char *nl = strchr(prompt, '\n');
+    size_t len = nl ? (size_t)(nl - prompt) : strlen(prompt);
+    if (len > outlen - 1) len = outlen - 1;
+    memcpy(out, prompt, len);
+    out[len] = '\0';
+}
+
+static void add_config_snapshot(cJSON *obj, const jb_config *cfg)
+{
+    cJSON *c = cJSON_CreateObject();
+    cJSON_AddStringToObject(c, "api_url", cfg->api_url);
+    cJSON_AddStringToObject(c, "model", cfg->model);
+    cJSON_AddNumberToObject(c, "max_tokens", cfg->max_tokens);
+    cJSON_AddNumberToObject(c, "max_output_lines", cfg->max_output_lines);
+    cJSON_AddNumberToObject(c, "max_output_bytes", cfg->max_output_bytes);
+    cJSON_AddItemToObject(obj, "config", c);
+}
+
+/* Fields present from the first write: identity, lineage, config snapshot */
+static cJSON *metadata_base(const jb_session *sess)
+{
+    cJSON *m = cJSON_CreateObject();
+    cJSON_AddStringToObject(m, "uuid", sess->uuid);
+    cJSON_AddStringToObject(m, "subject", sess->subject);
+    cJSON_AddStringToObject(m, "body", "");
+    cJSON_AddStringToObject(m, "author", sess->author);
+    cJSON_AddStringToObject(m, "started_at", sess->started_at);
+    cJSON_AddStringToObject(m, "working_dir", sess->working_dir);
+    add_config_snapshot(m, &sess->cfg_snapshot);
+    return m;
 }
 
 int session_write_metadata_init(jb_session *sess, const char *prompt,
                                 const char *working_dir, const jb_config *cfg)
 {
-    /* Derive title from prompt */
-    char title_buf[128];
-    make_title(prompt, title_buf, sizeof(title_buf));
-
-    /* Store for later use at close */
-    snprintf(sess->title, sizeof(sess->title), "%s", title_buf);
+    make_subject(prompt, sess->subject, sizeof(sess->subject));
     snprintf(sess->working_dir, sizeof(sess->working_dir), "%s", working_dir);
-    snprintf(sess->model, sizeof(sess->model), "%s", cfg->model);
-    sess->cfg_snapshot = *cfg;  /* snapshot for close metadata */
+    sess->cfg_snapshot = *cfg;
+    jb_iso8601_ms(sess->started_at, sizeof(sess->started_at));
 
-    iso8601_now(sess->started_at, sizeof(sess->started_at));
+    cJSON *m = metadata_base(sess);
+    cJSON_AddStringToObject(m, "status", "working");
+    cJSON_AddStringToObject(m, "last_activity", sess->started_at);
 
-    /* Build JSON manually — config object replaces top-level model */
-    char json[2048];
-    int n;
-    if (sess->parent[0] && sess->spawned_from[0]) {
-        n = snprintf(json, sizeof(json),
-            "{\"uuid\":\"%s\",\"parent\":\"%s\",\"spawned_from\":\"%s\",\"status\":\"running\",\"title\":\"%s\",\"started_at\":\"%s\",\"working_dir\":\"%s\",\"config\":{\"api_url\":\"%s\",\"model\":\"%s\",\"max_tokens\":%ld,\"max_output_lines\":%ld,\"max_output_bytes\":%ld}}",
-            sess->uuid, sess->parent, sess->spawned_from, title_buf, sess->started_at, working_dir,
-            cfg->api_url, cfg->model, cfg->max_tokens, cfg->max_output_lines, cfg->max_output_bytes);
-    } else if (sess->parent[0]) {
-        n = snprintf(json, sizeof(json),
-            "{\"uuid\":\"%s\",\"parent\":\"%s\",\"status\":\"running\",\"title\":\"%s\",\"started_at\":\"%s\",\"working_dir\":\"%s\",\"config\":{\"api_url\":\"%s\",\"model\":\"%s\",\"max_tokens\":%ld,\"max_output_lines\":%ld,\"max_output_bytes\":%ld}}",
-            sess->uuid, sess->parent, title_buf, sess->started_at, working_dir,
-            cfg->api_url, cfg->model, cfg->max_tokens, cfg->max_output_lines, cfg->max_output_bytes);
-    } else if (sess->spawned_from[0]) {
-        n = snprintf(json, sizeof(json),
-            "{\"uuid\":\"%s\",\"spawned_from\":\"%s\",\"status\":\"running\",\"title\":\"%s\",\"started_at\":\"%s\",\"working_dir\":\"%s\",\"config\":{\"api_url\":\"%s\",\"model\":\"%s\",\"max_tokens\":%ld,\"max_output_lines\":%ld,\"max_output_bytes\":%ld}}",
-            sess->uuid, sess->spawned_from, title_buf, sess->started_at, working_dir,
-            cfg->api_url, cfg->model, cfg->max_tokens, cfg->max_output_lines, cfg->max_output_bytes);
-    } else {
-        n = snprintf(json, sizeof(json),
-            "{\"uuid\":\"%s\",\"status\":\"running\",\"title\":\"%s\",\"started_at\":\"%s\",\"working_dir\":\"%s\",\"config\":{\"api_url\":\"%s\",\"model\":\"%s\",\"max_tokens\":%ld,\"max_output_lines\":%ld,\"max_output_bytes\":%ld}}",
-            sess->uuid, title_buf, sess->started_at, working_dir,
-            cfg->api_url, cfg->model, cfg->max_tokens, cfg->max_output_lines, cfg->max_output_bytes);
-    }
-
-    if (n < 0 || (size_t)n >= sizeof(json)) return -1;
-    return write_metadata_file(sess->metadata_path, json);
+    char *s = cJSON_PrintUnformatted(m);
+    cJSON_Delete(m);
+    if (!s) return -1;
+    int rc = write_metadata_file(sess->metadata_path, s);
+    free(s);
+    return rc;
 }
 
 int session_write_metadata_close(jb_session *sess, const char *status,
                                  long tokens_used, int turns, int exit_code)
 {
-    char ended_at[32];
-    iso8601_now(ended_at, sizeof(ended_at));
+    char ended_at[40];
+    jb_iso8601_ms(ended_at, sizeof(ended_at));
 
-    char json[2560];
-    int n;
-    if (sess->parent[0] && sess->spawned_from[0]) {
-        n = snprintf(json, sizeof(json),
-            "{\"uuid\":\"%s\",\"parent\":\"%s\",\"spawned_from\":\"%s\",\"status\":\"%s\",\"title\":\"%s\",\"started_at\":\"%s\",\"ended_at\":\"%s\",\"working_dir\":\"%s\",\"config\":{\"api_url\":\"%s\",\"model\":\"%s\",\"max_tokens\":%ld,\"max_output_lines\":%ld,\"max_output_bytes\":%ld},\"tokens_used\":%ld,\"turns\":%d,\"exit_code\":%d}",
-            sess->uuid, sess->parent, sess->spawned_from, status, sess->title, sess->started_at, ended_at,
-            sess->working_dir,
-            sess->cfg_snapshot.api_url, sess->cfg_snapshot.model,
-            sess->cfg_snapshot.max_tokens, sess->cfg_snapshot.max_output_lines,
-            sess->cfg_snapshot.max_output_bytes,
-            tokens_used, turns, exit_code);
-    } else if (sess->parent[0]) {
-        n = snprintf(json, sizeof(json),
-            "{\"uuid\":\"%s\",\"parent\":\"%s\",\"status\":\"%s\",\"title\":\"%s\",\"started_at\":\"%s\",\"ended_at\":\"%s\",\"working_dir\":\"%s\",\"config\":{\"api_url\":\"%s\",\"model\":\"%s\",\"max_tokens\":%ld,\"max_output_lines\":%ld,\"max_output_bytes\":%ld},\"tokens_used\":%ld,\"turns\":%d,\"exit_code\":%d}",
-            sess->uuid, sess->parent, status, sess->title, sess->started_at, ended_at,
-            sess->working_dir,
-            sess->cfg_snapshot.api_url, sess->cfg_snapshot.model,
-            sess->cfg_snapshot.max_tokens, sess->cfg_snapshot.max_output_lines,
-            sess->cfg_snapshot.max_output_bytes,
-            tokens_used, turns, exit_code);
-    } else if (sess->spawned_from[0]) {
-        n = snprintf(json, sizeof(json),
-            "{\"uuid\":\"%s\",\"spawned_from\":\"%s\",\"status\":\"%s\",\"title\":\"%s\",\"started_at\":\"%s\",\"ended_at\":\"%s\",\"working_dir\":\"%s\",\"config\":{\"api_url\":\"%s\",\"model\":\"%s\",\"max_tokens\":%ld,\"max_output_lines\":%ld,\"max_output_bytes\":%ld},\"tokens_used\":%ld,\"turns\":%d,\"exit_code\":%d}",
-            sess->uuid, sess->spawned_from, status, sess->title, sess->started_at, ended_at,
-            sess->working_dir,
-            sess->cfg_snapshot.api_url, sess->cfg_snapshot.model,
-            sess->cfg_snapshot.max_tokens, sess->cfg_snapshot.max_output_lines,
-            sess->cfg_snapshot.max_output_bytes,
-            tokens_used, turns, exit_code);
-    } else {
-        n = snprintf(json, sizeof(json),
-            "{\"uuid\":\"%s\",\"status\":\"%s\",\"title\":\"%s\",\"started_at\":\"%s\",\"ended_at\":\"%s\",\"working_dir\":\"%s\",\"config\":{\"api_url\":\"%s\",\"model\":\"%s\",\"max_tokens\":%ld,\"max_output_lines\":%ld,\"max_output_bytes\":%ld},\"tokens_used\":%ld,\"turns\":%d,\"exit_code\":%d}",
-            sess->uuid, status, sess->title, sess->started_at, ended_at,
-            sess->working_dir,
-            sess->cfg_snapshot.api_url, sess->cfg_snapshot.model,
-            sess->cfg_snapshot.max_tokens, sess->cfg_snapshot.max_output_lines,
-            sess->cfg_snapshot.max_output_bytes,
-            tokens_used, turns, exit_code);
-    }
+    cJSON *m = metadata_base(sess);
+    cJSON_AddStringToObject(m, "status", status);
+    cJSON_AddStringToObject(m, "ended_at", ended_at);
+    cJSON_AddNumberToObject(m, "turns", turns);
+    cJSON_AddNumberToObject(m, "tokens_used", tokens_used);
+    cJSON_AddNumberToObject(m, "exit_code", exit_code);
+    cJSON_AddStringToObject(m, "last_activity", ended_at);
 
-    if (n < 0 || (size_t)n >= sizeof(json)) return -1;
-    return write_metadata_file(sess->metadata_path, json);
+    char *s = cJSON_PrintUnformatted(m);
+    cJSON_Delete(m);
+    if (!s) return -1;
+    int rc = write_metadata_file(sess->metadata_path, s);
+    free(s);
+    return rc;
+}
+
+void session_close(jb_session *sess)
+{
+    if (sess->session_fp) { fclose(sess->session_fp); sess->session_fp = NULL; }
+    if (sess->events_fp) { fclose(sess->events_fp); sess->events_fp = NULL; }
 }

@@ -15,7 +15,7 @@
 # user's real config location.
 REAL_CFG="${XDG_CONFIG_HOME:-$HOME/.config}/jb/config.json"
 
-# Per-test session store; set by new_scratch().
+# Per-test session store; set by repo_init() to $SCRATCH/.jb/sessions.
 JB_SESSIONS_DIR=""
 
 # All scratch dirs created so far; run.sh's EXIT trap removes them
@@ -40,10 +40,12 @@ new_scratch() {
     cd "$SCRATCH" || exit 1
 }
 
-# repo_init — bring up a repository context for a test. Phase 1: the scratch
-# dir itself (jb init does not exist yet); phase 2 adds `jb init` here.
+# repo_init — bring up a repository context for a test: jb init in the
+# current scratch dir (phase 2: jb init exists now).
 repo_init() {
-    new_scratch
+    "$JB" init >/dev/null 2>&1 || return 1
+    JB_SESSIONS_DIR="$SCRATCH/.jb/sessions"
+    cd "$SCRATCH" || exit 1
 }
 
 # newest_session — path (trailing slash) of the most recently started session
