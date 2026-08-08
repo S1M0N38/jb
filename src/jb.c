@@ -656,6 +656,12 @@ int main(int argc, char **argv)
     if (strcmp(verb, "show") == 0) {
         return cmd_show(verb_arg);
     }
+    if (strcmp(verb, "ps") == 0) {
+        return cmd_ps();
+    }
+    if (strcmp(verb, "status") == 0) {
+        return cmd_status();
+    }
 
     fprintf(stderr, "jb: unknown command '%s' (see 'jb help')\n", verb);
     return 2;

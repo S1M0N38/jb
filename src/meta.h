@@ -29,4 +29,12 @@ int cmd_path(const char *id_arg);
    metadata path on stderr. ID defaults to @. 0 · 1 not found/not set */
 int cmd_show(const char *id_arg);
 
+/* jb ps — children of @: pending id<TAB>status<TAB>age<TAB>subject,
+   then committed: N. 0 · 1 no JB_SESSION */
+int cmd_ps(void);
+
+/* jb status — session line / working list, children, awaiting commit,
+   repo summary. Stale JB_SESSION warns and falls back. 0 · 1 not a repo */
+int cmd_status(void);
+
 #endif

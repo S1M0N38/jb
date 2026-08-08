@@ -89,36 +89,36 @@ iso_ms() {
 # status is working — then no ended_at). The fixture mirrors what
 # session.c writes (§6 of the reference).
 fixture_session() {
-    _uuid="$1"; _status="$2"
-    _subject="${3:-fixture $1}"
-    _author="${4:-}"
-    _parent="${5:-}"
-    _start_ago="${6:-120}"
-    _dir="$JB_SESSIONS_DIR/$_uuid"
-    mkdir -p "$_dir"
-    printf '{"type":"session","version":3,"id":"%s"}\n' "$_uuid" > "$_dir/session.jsonl"
-    : > "$_dir/events.jsonl"
-    _now=$(date +%s)
-    _start=$(iso_ms $((_now - _start_ago)))
-    _end=$(iso_ms "$_now")
+    _fs_uuid="$1"; _fs_status="$2"
+    _fs_subject="${3:-fixture $1}"
+    _fs_author="${4:-}"
+    _fs_parent="${5:-}"
+    _fs_start_ago="${6:-120}"
+    _fs_dir="$JB_SESSIONS_DIR/$_fs_uuid"
+    mkdir -p "$_fs_dir"
+    printf '{"type":"session","version":3,"id":"%s"}\n' "$_fs_uuid" > "$_fs_dir/session.jsonl"
+    : > "$_fs_dir/events.jsonl"
+    _fs_now=$(date +%s)
+    _fs_start=$(iso_ms $((_fs_now - _fs_start_ago)))
+    _fs_end=$(iso_ms "$_fs_now")
     {
         printf '{\n'
-        printf '  "uuid": "%s",\n' "$_uuid"
-        printf '  "subject": "%s",\n' "$_subject"
+        printf '  "uuid": "%s",\n' "$_fs_uuid"
+        printf '  "subject": "%s",\n' "$_fs_subject"
         printf '  "body": "",\n'
-        printf '  "author": "%s",\n' "$_author"
-        if [ -n "$_parent" ]; then
-            printf '  "parent": "%s",\n' "$_parent"
+        printf '  "author": "%s",\n' "$_fs_author"
+        if [ -n "$_fs_parent" ]; then
+            printf '  "parent": "%s",\n' "$_fs_parent"
         fi
-        printf '  "status": "%s",\n' "$_status"
-        printf '  "started_at": "%s",\n' "$_start"
-        if [ "$_status" != "working" ]; then
-            printf '  "ended_at": "%s",\n' "$_end"
+        printf '  "status": "%s",\n' "$_fs_status"
+        printf '  "started_at": "%s",\n' "$_fs_start"
+        if [ "$_fs_status" != "working" ]; then
+            printf '  "ended_at": "%s",\n' "$_fs_end"
         fi
         printf '  "working_dir": "%s",\n' "$SCRATCH"
         printf '  "config": {"api_url":"https://api.openai.com/v1","model":"gpt-4.1","max_tokens":500000,"max_output_lines":2000,"max_output_bytes":51200},\n'
         printf '  "turns": 1, "tokens_used": 10, "exit_code": 0,\n'
-        printf '  "last_activity": "%s"\n' "$_end"
+        printf '  "last_activity": "%s"\n' "$_fs_end"
         printf '}\n'
-    } > "$_dir/metadata.json"
+    } > "$_fs_dir/metadata.json"
 }
