@@ -264,7 +264,9 @@ static int api_chat_with_retry(const jb_config *cfg, const char *sys_prompt,
 
 /* Resolve a session ID argument for --fork/--seed (moved to meta.c) */
 
-static int cmd_run(const char *config_path, const char *argv0, int run_argc, char **run_argv);
+static int cmd_run(const char *config_path, const char *const *overrides,
+                   int override_count, const char *argv0, int run_argc,
+                   char **run_argv);
 static int api_chat_with_retry(const jb_config *cfg, const char *sys_prompt,
                                cJSON *messages, cJSON *tools, api_response *resp,
                                sse_delta_cb on_delta, void *delta_userdata)
@@ -583,6 +585,8 @@ int main(int argc, char **argv)
        --version, --help. Then dispatch on the first non-flag token. */
     const char *dir_arg = NULL;   /* -C DIR */
     const char *config_path = NULL;
+    const char *overrides[64];    /* -c KEY=VALUE (repeatable) */
+    int override_count = 0;
     int config_count = 0;
     int i = 1;
 
@@ -614,6 +618,15 @@ int main(int argc, char **argv)
                 return 2;
             }
             config_path = argv[++i];
+            continue;
+        }
+        if (strcmp(argv[i], "-c") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "jb: option '-c' requires a value\n");
+                return 2;
+            }
+            if (override_count < 64)
+                overrides[override_count++] = argv[++i];
             continue;
         }
         if (argv[i][0] == '-') {
@@ -648,7 +661,11 @@ int main(int argc, char **argv)
         return cmd_init();
     }
     if (strcmp(verb, "run") == 0) {
-        return cmd_run(config_path, argv[0], argc - i - 1, argv + i + 1);
+        return cmd_run(config_path, overrides, override_count,
+                       argv[0], argc - i - 1, argv + i + 1);
+    }
+    if (strcmp(verb, "config") == 0) {
+        return cmd_config(argc - i - 1, argv + i + 1);
     }
     if (strcmp(verb, "path") == 0) {
         return cmd_path(verb_arg);
@@ -673,7 +690,9 @@ int main(int argc, char **argv)
     return 2;
 }
 
-static int cmd_run(const char *config_path, const char *argv0, int run_argc, char **run_argv)
+static int cmd_run(const char *config_path, const char *const *overrides,
+                   int override_count, const char *argv0, int run_argc,
+                   char **run_argv)
 {
     /* run verb flags: --fork ID, --seed ID, --config PATH */
     const char *fork_arg = NULL;
@@ -773,6 +792,27 @@ static int cmd_run(const char *config_path, const char *argv0, int run_argc, cha
     /* Load config — failure is an error (exit 1) */
     if (config_load(&cfg, config_path) != 0) {
         return 1;
+    }
+
+    /* -c KEY=VALUE overrides (global flag, repeatable) — applied to this
+       run only, never persisted. Unknown keys are silently ignored
+       (git-style tolerance: values are coerced at use). */
+    for (int k = 0; k < override_count; k++) {
+        const char *eq = strchr(overrides[k], '=');
+        if (!eq) continue;
+        size_t klen = (size_t)(eq - overrides[k]);
+        const char *val = eq + 1;
+        if (klen == 5 && strncmp(overrides[k], "model", 5) == 0)
+            strncpy(cfg.model, val, sizeof(cfg.model) - 1);
+        else if (klen == 7 && strncmp(overrides[k], "api_url", 7) == 0)
+            strncpy(cfg.api_url, val, sizeof(cfg.api_url) - 1);
+        else if (klen == 10 && strncmp(overrides[k], "max_tokens", 10) == 0)
+            cfg.max_tokens = atol(val);
+        else if (klen == 16 && strncmp(overrides[k], "max_output_lines", 16) == 0)
+            cfg.max_output_lines = atol(val);
+        else if (klen == 16 && strncmp(overrides[k], "max_output_bytes", 16) == 0)
+            cfg.max_output_bytes = atol(val);
+        /* unknown keys silently ignored */
     }
 
     /* Pass resolved config path to tools for child jb inheritance */

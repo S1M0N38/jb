@@ -719,3 +719,190 @@ int cmd_show(const char *id_arg)
     cJSON_Delete(root);
     return 0;
 }
+
+/* ---- jb config: git-style global/local mirror (§7) ---- */
+
+typedef struct {
+    char key[128];
+    char val[256];
+} cfg_kv;
+
+/* kv_set — copy key/value into kvs[n] (the cJSON tree is freed after
+   collection, so nothing may point into it). */
+static void kv_set(cfg_kv *kv, const char *key, const char *val)
+{
+    strncpy(kv->key, key, sizeof(kv->key) - 1);
+    snprintf(kv->val, sizeof(kv->val), "%s", val ? val : "");
+}
+
+/* collect_config_keys — copy a file's keys into kvs (string values as-is,
+   numbers formatted). Returns the number collected. */
+static int collect_config_keys(cJSON *root, cfg_kv *kvs, int max)
+{
+    int n = 0;
+    for (cJSON *c = root->child; c && n < max; c = c->next) {
+        if (!c->string) continue;
+        if (cJSON_IsString(c) && c->valuestring) {
+            kv_set(&kvs[n], c->string, c->valuestring);
+            n++;
+        } else if (cJSON_IsNumber(c)) {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%lld", (long long)c->valuedouble);
+            kv_set(&kvs[n], c->string, buf);
+            n++;
+        }
+    }
+    return n;
+}
+
+static int cmp_cfg_kv(const void *a, const void *b)
+{
+    return strcmp(((const cfg_kv *)a)->key, ((const cfg_kv *)b)->key);
+}
+
+/* cmd_config [--global|--local] [KEY [VALUE]] — list effective settings
+   (local merged over global, sorted key=value), print a key, or set a key
+   (local file by default, --global for the global file). Any key accepted;
+   values stored as strings, coerced at use. 0 · 1 · 2 usage (§7). */
+int cmd_config(int argc, char **argv)
+{
+    int global = 0;
+    int i = 0;
+    while (i < argc && argv[i][0] == '-') {
+        if (strcmp(argv[i], "--global") == 0) global = 1;
+        else if (strcmp(argv[i], "--local") == 0) global = 0;
+        else {
+            fprintf(stderr, "jb: unknown option '%s' for 'config'\n", argv[i]);
+            return 2;
+        }
+        i++;
+    }
+    if (argc - i > 2) {
+        fprintf(stderr, "jb: too many arguments for 'config' (see 'jb help config')\n");
+        return 2;
+    }
+
+    char gpath[4096];
+    config_global_path(gpath, sizeof(gpath));
+    char lpath[4096] = "";
+    if (!global) {
+        char repo_root[4096];
+        if (require_repo(repo_root, sizeof(repo_root)) == 0)
+            snprintf(lpath, sizeof(lpath), "%s/.jb/config.json", repo_root);
+    }
+
+    /* ---- set: KEY VALUE → local by default, --global for global ---- */
+    if (argc - i == 2) {
+        const char *path = global ? gpath : (lpath[0] ? lpath : NULL);
+        if (!path) {
+            fprintf(stderr, "jb: fatal: not a jb repository (run 'jb init')\n");
+            return 1;
+        }
+        cJSON *root = NULL;
+        char *json = read_file(path);
+        if (json) {
+            root = cJSON_Parse(json);
+            free(json);
+        }
+        if (!root) root = cJSON_CreateObject();
+        cJSON_DeleteItemFromObjectCaseSensitive(root, argv[i]);
+        cJSON_AddStringToObject(root, argv[i], argv[i + 1]);
+        char *out = cJSON_PrintUnformatted(root);
+        char tmp[4096];
+        snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+        FILE *f = fopen(tmp, "w");
+        int rc = 1;
+        if (f && out) {
+            fputs(out, f);
+            fclose(f);
+            if (rename(tmp, path) == 0) rc = 0;
+        } else if (f) {
+            fclose(f);
+        }
+        free(out);
+        cJSON_Delete(root);
+        return rc;
+    }
+
+    /* ---- get: KEY → the effective value (local over global) ---- */
+    if (argc - i == 1) {
+        const char *key = argv[i];
+        const char *paths[2] = { lpath[0] ? lpath : NULL, gpath };
+        for (int p = 0; p < 2; p++) {
+            if (!paths[p]) continue;
+            char *json = read_file(paths[p]);
+            if (!json) continue;
+            cJSON *root = cJSON_Parse(json);
+            free(json);
+            if (!root) { cJSON_Delete(root); continue; }
+            cJSON *v = cJSON_GetObjectItemCaseSensitive(root, key);
+            if (cJSON_IsString(v) && v->valuestring) {
+                printf("%s\n", v->valuestring);
+                cJSON_Delete(root);
+                return 0;
+            }
+            if (cJSON_IsNumber(v)) {
+                printf("%lld\n", (long long)v->valuedouble);
+                cJSON_Delete(root);
+                return 0;
+            }
+            cJSON_Delete(root);
+        }
+        fprintf(stderr, "jb: no such key '%s'\n", key);
+        return 1;
+    }
+
+    /* ---- list: local merged over global, sorted ---- */
+    cfg_kv kvs[256];
+    int n = 0;
+    char *json = read_file(gpath);
+    if (json) {
+        cJSON *root = cJSON_Parse(json);
+        free(json);
+        if (root) {
+            n = collect_config_keys(root, kvs, 256);
+            cJSON_Delete(root);
+        }
+    }
+    json = read_file(lpath);
+    if (json) {
+        cJSON *root = cJSON_Parse(json);
+        free(json);
+        if (root) {
+            for (cJSON *c = root->child; c && n < 256; c = c->next) {
+                if (!c->string) continue;
+                int found = 0;
+                for (int k = 0; k < n; k++) {
+                    if (strcmp(kvs[k].key, c->string) == 0) {
+                        if (cJSON_IsString(c) && c->valuestring)
+                            kv_set(&kvs[k], c->string, c->valuestring);
+                        else if (cJSON_IsNumber(c)) {
+                            char buf[32];
+                            snprintf(buf, sizeof(buf), "%lld",
+                                     (long long)c->valuedouble);
+                            kv_set(&kvs[k], c->string, buf);
+                        }
+                        found = 1;
+                        break;
+                    }
+                }
+                if (!found && (cJSON_IsString(c) || cJSON_IsNumber(c))) {
+                    if (cJSON_IsString(c))
+                        kv_set(&kvs[n], c->string, c->valuestring);
+                    else {
+                        char buf[32];
+                        snprintf(buf, sizeof(buf), "%lld",
+                                 (long long)c->valuedouble);
+                        kv_set(&kvs[n], c->string, buf);
+                    }
+                    n++;
+                }
+            }
+            cJSON_Delete(root);
+        }
+    }
+    qsort(kvs, (size_t)n, sizeof(*kvs), cmp_cfg_kv);
+    for (int k = 0; k < n; k++)
+        printf("%s=%s\n", kvs[k].key, kvs[k].val);
+    return 0;
+}

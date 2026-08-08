@@ -1,9 +1,11 @@
 /* config.c — configuration loading from XDG config path */
 #include "config.h"
+#include "meta.h"
 #include "cJSON.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* Track resolved config path for child inheritance */
 static char g_resolved_path[4096] = "";
@@ -33,6 +35,49 @@ static const char *xdg_config_home(void)
     static char buf[4096];
     snprintf(buf, sizeof(buf), "%s/.config", getenv("HOME"));
     return buf;
+}
+
+/* config_global_path — ~/.config/jb/config.json (or $XDG_CONFIG_HOME). */
+int config_global_path(char *out, size_t outlen)
+{
+    snprintf(out, outlen, "%s/jb/config.json", xdg_config_home());
+    return 0;
+}
+
+/* num_or_str — values are stored as strings by jb config; the reader
+   coerces (git-style tolerance). */
+static long num_or_str(const cJSON *v, long fallback)
+{
+    if (cJSON_IsNumber(v)) return (long)v->valuedouble;
+    if (cJSON_IsString(v) && v->valuestring) return atol(v->valuestring);
+    return fallback;
+}
+
+/* overlay_file — apply a config file's known keys onto cfg (missing file
+   is a no-op). Used for the local .jb/config.json merge. */
+static void overlay_file(jb_config *cfg, const char *path)
+{
+    char *json = read_file(path);
+    if (!json) return;
+    cJSON *root = cJSON_Parse(json);
+    free(json);
+    if (!root) { cJSON_Delete(root); return; }
+
+    cJSON *v;
+    v = cJSON_GetObjectItemCaseSensitive(root, "api_url");
+    if (cJSON_IsString(v) && v->valuestring)
+        strncpy(cfg->api_url, v->valuestring, sizeof(cfg->api_url) - 1);
+    v = cJSON_GetObjectItemCaseSensitive(root, "model");
+    if (cJSON_IsString(v) && v->valuestring)
+        strncpy(cfg->model, v->valuestring, sizeof(cfg->model) - 1);
+    v = cJSON_GetObjectItemCaseSensitive(root, "max_tokens");
+    cfg->max_tokens = num_or_str(v, cfg->max_tokens);
+    v = cJSON_GetObjectItemCaseSensitive(root, "max_output_lines");
+    cfg->max_output_lines = num_or_str(v, cfg->max_output_lines);
+    v = cJSON_GetObjectItemCaseSensitive(root, "max_output_bytes");
+    cfg->max_output_bytes = num_or_str(v, cfg->max_output_bytes);
+
+    cJSON_Delete(root);
 }
 
 int config_load(jb_config *cfg, const char *config_path)
@@ -80,22 +125,31 @@ int config_load(jb_config *cfg, const char *config_path)
         strncpy(cfg->model, v->valuestring, sizeof(cfg->model) - 1);
 
     v = cJSON_GetObjectItemCaseSensitive(root, "max_tokens");
-    if (cJSON_IsNumber(v))
-        cfg->max_tokens = (long)v->valuedouble;
+    cfg->max_tokens = num_or_str(v, cfg->max_tokens);
 
     v = cJSON_GetObjectItemCaseSensitive(root, "max_output_lines");
-    if (cJSON_IsNumber(v))
-        cfg->max_output_lines = (long)v->valuedouble;
+    cfg->max_output_lines = num_or_str(v, cfg->max_output_lines);
 
     v = cJSON_GetObjectItemCaseSensitive(root, "max_output_bytes");
-    if (cJSON_IsNumber(v))
-        cfg->max_output_bytes = (long)v->valuedouble;
+    cfg->max_output_bytes = num_or_str(v, cfg->max_output_bytes);
 
     cJSON_Delete(root);
 
     /* Save resolved config path for child inheritance */
     if (config_path) {
         strncpy(g_resolved_path, path, sizeof(g_resolved_path) - 1);
+    }
+
+    /* Phase 6: the repo's local .jb/config.json merges over the global
+       (git config --local analog) — the effective view is the merged one. */
+    char cwd[4096];
+    if (getcwd(cwd, sizeof(cwd))) {
+        char repo_root[4096];
+        if (jb_find_repo(cwd, repo_root, sizeof(repo_root)) == 0) {
+            char local[4096];
+            snprintf(local, sizeof(local), "%s/.jb/config.json", repo_root);
+            overlay_file(cfg, local);
+        }
     }
 
     /* API key is required from environment */

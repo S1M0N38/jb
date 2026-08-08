@@ -45,4 +45,7 @@ int cmd_log(const char *graph_arg);
    0 completed · 1 error/not found · 2 usage */
 int cmd_wait(const char *id_arg);
 
+/* jb config [--global|--local] [KEY [VALUE]] — list/get/set. 0 · 1 · 2 */
+int cmd_config(int argc, char **argv);
+
 #endif
