@@ -1,7 +1,12 @@
 #!/bin/sh
 # jb test runner — shell-based integration tests
 # Usage: ./tests/run.sh
-# Each test_*.sh is sourced; use assert_* helpers.
+# Each test_*.sh is sourced into its own scratch dir; use assert_* helpers.
+# Isolation: tests/run.sh sources tests/lib.sh and calls new_scratch() before
+# every test file, so each test_*.sh runs in a fresh scratch dir with
+# HOME/XDG_CONFIG_HOME/XDG_CACHE_HOME/TMPDIR redirected into it. Nothing a
+# test does can touch the real ~/.cache, ~/.config, or the repo. Scratch
+# dirs are removed on exit unless TEST_KEEP=1.
 
 # NOTE: do NOT use set -e — tests must capture non-zero exit codes
 
@@ -57,23 +62,39 @@ assert_dir_exists() {
 
 skip() { PASS=$((PASS + 1)); TOTAL=$((TOTAL + 1)); echo "  SKIP: $1 ${2:+— $2}"; }
 
-JB="./jb"
+# Repo-absolute paths: tests cd into per-test scratch dirs, so every repo
+# reference must be absolute (use $REPO_ROOT/...).
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+JB="$REPO_ROOT/jb"
+
+# Scratch isolation helpers (new_scratch, repo_init, newest_session,
+# session_dir, prompt_pong) — sourced before any test file.
+. "$REPO_ROOT/tests/lib.sh"
+
+# Remove all scratch dirs on exit unless TEST_KEEP=1
+if [ "$TEST_KEEP" != "1" ]; then
+    trap 'for _s in $SCRATCHES; do [ -n "$_s" ] && rm -rf "$_s"; done' EXIT
+fi
+
+run_test_file() {
+    # Fresh scratch per test file: isolated env, cwd = scratch
+    new_scratch
+    echo ""
+    echo "--- $(basename "$1") ---"
+    . "$1"
+}
 
 # Support running specific tests: make test-TESTNAME
 if [ -n "$TEST_FILTER" ]; then
     echo "=== jb test suite (filter: $TEST_FILTER) ==="
-    for t in tests/test_${TEST_FILTER}.sh; do
+    for t in "$REPO_ROOT"/tests/test_${TEST_FILTER}.sh; do
         [ -f "$t" ] || { echo "No test matching: test_${TEST_FILTER}.sh" >&2; exit 1; }
-        echo ""
-        echo "--- $(basename "$t") ---"
-        . "$t"
+        run_test_file "$t"
     done
 else
     echo "=== jb test suite ==="
-    for t in tests/test_*.sh; do
-        echo ""
-        echo "--- $(basename "$t") ---"
-        . "$t"
+    for t in "$REPO_ROOT"/tests/test_*.sh; do
+        run_test_file "$t"
     done
 fi
 

@@ -8,5 +8,8 @@ jb
 # OS files
 .DS_Store
 
+# Pi harness state
+.pi-subagents/
+
 # Python
 __pycache__
