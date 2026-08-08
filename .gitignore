@@ -2,6 +2,9 @@
 *.o
 jb
 
+# Secrets / local env
+.envrc
+
 # OS files
 .DS_Store
 
