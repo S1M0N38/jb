@@ -1,0 +1,27 @@
+{
+  "worktree": {
+    "setup": [
+      "cp \"$PASEO_SOURCE_CHECKOUT_PATH/.envrc\" .envrc",
+      "make"
+    ]
+  },
+  "scripts": {
+    "build": {
+      "command": "make"
+    },
+    "test": {
+      "command": "make test"
+    }
+  },
+  "metadataGeneration": {
+    "branchName": {
+      "instructions": "Kebab-case slug. Prefix with the conventional-commit type of the change (feat/, fix/, chore/, refactor/, test/, docs/). Keep it short — under 50 characters."
+    },
+    "commitMessage": {
+      "instructions": "Follow Conventional Commits: <type>(<scope>): <subject>, e.g. feat(config): add --config flag. Scope is the affected area in parentheses when relevant (config, session, api, tools, prompt, view, lineage). Subject in imperative mood, under 50 chars, no trailing period. Add a short body only when the why isn't obvious."
+    },
+    "pullRequest": {
+      "instructions": "Summarize the diff in 2–4 sentences, list the main areas touched, and include a Testing section noting make and make test."
+    }
+  }
+}
