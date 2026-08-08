@@ -46,13 +46,17 @@ void api_response_init(api_response *resp);
 
 /* Send the pi-format messages array to the API and stream the response.
    The system prompt is prepended at request time — never persisted.
+   max_tokens caps the completion when > 0 (0 = omit — the run loop's
+   budget is enforced client-side, the commit generation caps at ~512).
+   json_mode sends response_format {"type":"json_object"} — the commit
+   generation's retry uses it to force a parseable reply.
    Returns 0 on success, -1 on error.
    resp is filled with parsed content. on_delta, when non-NULL, fires per
    text/toolcall delta with the block's contentIndex (§5) — the events
    stream's message_update source. */
 int api_chat(const jb_config *cfg, const char *sys_prompt, cJSON *messages,
-             cJSON *tools, api_response *resp, sse_delta_cb on_delta,
-             void *delta_userdata);
+             cJSON *tools, long max_tokens, int json_mode,
+             api_response *resp, sse_delta_cb on_delta, void *delta_userdata);
 
 /* Copy the text streamed so far by the in-flight api_chat call into out
    ("" when no stream is active). For the SIGINT abort path. */

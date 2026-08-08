@@ -122,7 +122,9 @@ int cmd_path(const char *id_arg)
 
 /* ---- shared metadata reading ---- */
 
-static char *read_file(const char *path)
+/* jb_read_file — read a whole file into a malloc'd NUL-terminated buffer
+   (caller frees), or NULL when it cannot be read. */
+char *jb_read_file(const char *path)
 {
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
@@ -266,7 +268,7 @@ static int session_list_scan(const char *repo_root, session_list *list)
         if (de->d_name[0] == '.') continue;
         char meta[4096];
         snprintf(meta, sizeof(meta), "%s/%s/metadata.json", sessions_dir, de->d_name);
-        char *json = read_file(meta);
+        char *json = jb_read_file(meta);
         if (!json) continue;
         cJSON *root = cJSON_Parse(json);
         free(json);
@@ -342,8 +344,8 @@ static int cmp_started_desc(const void *a, const void *b)
     return strcmp(ra->uuid, rb->uuid);
 }
 
-/* short id — first 8 hex chars of a uuid */
-static void id8(const char *uuid, char *out, size_t outlen)
+/* jb_short_id — first 8 hex chars of a uuid (the log/status id form) */
+void jb_short_id(const char *uuid, char *out, size_t outlen)
 {
     snprintf(out, outlen, "%.8s", uuid);
 }
@@ -400,7 +402,7 @@ int cmd_status(void)
     if (self_rec) {
         /* session line: identity, status, subject, age */
         char sid[9], age[64];
-        id8(self_rec->uuid, sid, sizeof(sid));
+        jb_short_id(self_rec->uuid, sid, sizeof(sid));
         if (strcmp(self_rec->status, "working") == 0) {
             char a[32];
             age_short(now, rec_age_anchor_ms(self_rec), a, sizeof(a));
@@ -421,7 +423,7 @@ int cmd_status(void)
             printf("children: %d\n", pending.n);
             for (int i = 0; i < pending.n; i++) {
                 char cid[9], age2[32];
-                id8(pending.items[i].uuid, cid, sizeof(cid));
+                jb_short_id(pending.items[i].uuid, cid, sizeof(cid));
                 age_mmss(now, rec_age_anchor_ms(&pending.items[i]), age2, sizeof(age2));
                 printf("  %s  %s  %s  \"%s\"\n", cid, pending.items[i].status,
                        age2, pending.items[i].subject);
@@ -443,7 +445,7 @@ int cmd_status(void)
             printf("working: %d (", working.n);
             for (int i = 0; i < working.n; i++) {
                 char wid[9], subj[64];
-                id8(working.items[i].uuid, wid, sizeof(wid));
+                jb_short_id(working.items[i].uuid, wid, sizeof(wid));
                 subject_trunc(working.items[i].subject, subj, sizeof(subj));
                 printf("%s%s \"%s\"", i ? ", " : "", wid, subj);
             }
@@ -464,7 +466,7 @@ int cmd_status(void)
         printf("awaiting commit: %d (", awaiting.n);
         for (int i = 0; i < awaiting.n; i++) {
             char aid[9];
-            id8(awaiting.items[i].uuid, aid, sizeof(aid));
+            jb_short_id(awaiting.items[i].uuid, aid, sizeof(aid));
             printf("%s%s", i ? ", " : "", aid);
         }
         printf(")\n");
@@ -514,8 +516,8 @@ int cmd_log(const char *graph_arg)
         for (int i = 0; i < list.n; i++) {
             session_rec *r = &list.items[i];
             char sid[9], author[9], age[32], subj[64];
-            id8(r->uuid, sid, sizeof(sid));
-            if (r->author[0]) id8(r->author, author, sizeof(author));
+            jb_short_id(r->uuid, sid, sizeof(sid));
+            if (r->author[0]) jb_short_id(r->author, author, sizeof(author));
             else snprintf(author, sizeof(author), "-");
             age_short(now, rec_age_anchor_ms(r), age, sizeof(age));
             subject_trunc(r->subject, subj, sizeof(subj));
@@ -615,14 +617,14 @@ int cmd_log(const char *graph_arg)
                 }
 
         char sid[9], subj[64];
-        id8(nodes[ri].rec->uuid, sid, sizeof(sid));
+        jb_short_id(nodes[ri].rec->uuid, sid, sizeof(sid));
         subject_trunc(nodes[ri].rec->subject, subj, sizeof(subj));
         printf("%s  %s%s  \"%s\"\n", sid,
                nodes[ri].rec->exit_code != 0 ? "[error]  " : "",
                kind_name[nodes[ri].kind], subj);
         for (int k = 0; k < kn; k++) {
             int ci = kids[k];
-            id8(nodes[ci].rec->uuid, sid, sizeof(sid));
+            jb_short_id(nodes[ci].rec->uuid, sid, sizeof(sid));
             subject_trunc(nodes[ci].rec->subject, subj, sizeof(subj));
             printf("%s %s  %s%s  \"%s\"\n",
                    k == kn - 1 ? "└──" : "├──", sid,
@@ -670,7 +672,7 @@ int cmd_wait(const char *id_arg)
     fprintf(stderr, "jb: waiting for %.8s…\n", uuid);
 
     for (;;) {
-        char *json = read_file(meta);
+        char *json = jb_read_file(meta);
         if (!json) return 1;   /* vanished mid-wait → not found */
         cJSON *root = cJSON_Parse(json);
         free(json);
@@ -709,7 +711,7 @@ int cmd_ps(void)
     for (int i = 0; i < pending.n; i++) {
         session_rec *r = &pending.items[i];
         char sid[9], age[32];
-        id8(r->uuid, sid, sizeof(sid));
+        jb_short_id(r->uuid, sid, sizeof(sid));
         age_mmss(now, rec_age_anchor_ms(r), age, sizeof(age));
         printf("%s\t%s\t%s\t\"%s\"\n", sid, r->status, age, r->subject);
     }
@@ -734,7 +736,7 @@ int cmd_show(const char *id_arg)
 
     char meta_path[4096];
     snprintf(meta_path, sizeof(meta_path), "%s/metadata.json", dir);
-    char *json = read_file(meta_path);
+    char *json = jb_read_file(meta_path);
     if (!json) {
         fprintf(stderr, "jb: no metadata for '%s'\n", id_arg ? id_arg : "@");
         return 1;
@@ -840,7 +842,7 @@ int cmd_config(int argc, char **argv)
         }
 
         cJSON *root = NULL;
-        char *json = read_file(path);
+        char *json = jb_read_file(path);
         if (json) {
             root = cJSON_Parse(json);
             free(json);
@@ -873,7 +875,7 @@ int cmd_config(int argc, char **argv)
         const char *paths[2] = { lpath[0] ? lpath : NULL, gpath };
         for (int p = 0; p < 2; p++) {
             if (!paths[p]) continue;
-            char *json = read_file(paths[p]);
+            char *json = jb_read_file(paths[p]);
             if (!json) continue;
             cJSON *root = cJSON_Parse(json);
             free(json);
@@ -898,7 +900,7 @@ int cmd_config(int argc, char **argv)
     /* ---- list: local merged over global, sorted ---- */
     cfg_kv kvs[256];
     int n = 0;
-    char *json = read_file(gpath);
+    char *json = jb_read_file(gpath);
     if (json) {
         cJSON *root = cJSON_Parse(json);
         free(json);
@@ -907,7 +909,7 @@ int cmd_config(int argc, char **argv)
             cJSON_Delete(root);
         }
     }
-    json = read_file(lpath);
+    json = jb_read_file(lpath);
     if (json) {
         cJSON *root = cJSON_Parse(json);
         free(json);

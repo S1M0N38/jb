@@ -7,6 +7,7 @@ VENDIR  = src/vendor
 
 SRCS    = $(SRCDIR)/jb.c \
           $(SRCDIR)/config.c \
+          $(SRCDIR)/commit.c \
           $(SRCDIR)/meta.c \
           $(SRCDIR)/session.c \
           $(SRCDIR)/api.c \

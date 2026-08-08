@@ -10,6 +10,7 @@
 #include "session.h"
 #include "api.h"
 #include "meta.h"
+#include "commit.h"
 #include "tools.h"
 #include "prompt.h"
 #include "version.h"
@@ -258,7 +259,7 @@ static int api_chat_with_retry(const jb_config *cfg, const char *sys_prompt,
     int base_delay = 2;  /* seconds */
 
     for (int attempt = 0; attempt <= max_retries; attempt++) {
-        int rc = api_chat(cfg, sys_prompt, messages, tools, resp,
+        int rc = api_chat(cfg, sys_prompt, messages, tools, 0, 0, resp,
                           on_delta, delta_userdata);
 
         if (rc == 0) return 0;
@@ -646,6 +647,9 @@ int main(int argc, char **argv)
     if (strcmp(verb, "run") == 0) {
         return cmd_run(config_path, overrides, override_count,
                        argv[0], argc - i - 1, argv + i + 1);
+    }
+    if (strcmp(verb, "commit") == 0) {
+        return cmd_commit(argc - i - 1, argv + i + 1);
     }
     if (strcmp(verb, "config") == 0) {
         return cmd_config(argc - i - 1, argv + i + 1);

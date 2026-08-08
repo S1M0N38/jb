@@ -340,7 +340,8 @@ static cJSON *pi_toolcalls_to_wire(const cJSON *msg)
 
 /* Build the curl command and pipe its stdout */
 static char *build_request_body(const jb_config *cfg, const char *sys_prompt,
-                                cJSON *messages, cJSON *tools)
+                                cJSON *messages, cJSON *tools,
+                                long max_tokens, int json_mode)
 {
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "model", cfg->model);
@@ -388,7 +389,20 @@ static char *build_request_body(const jb_config *cfg, const char *sys_prompt,
     }
 
     cJSON_AddItemToObject(root, "messages", wire);
-    cJSON_AddItemReferenceToObject(root, "tools", tools);
+    /* tools: NULL disables tool calling entirely (commit's message
+       generation — cJSON_AddItemReferenceToObject no-ops on NULL) */
+    if (tools) cJSON_AddItemReferenceToObject(root, "tools", tools);
+    /* max_tokens: 0 omits the field (run loop — the budget is enforced
+       client-side); the commit generation caps at ~512 tokens (§7) */
+    if (max_tokens > 0)
+        cJSON_AddNumberToObject(root, "max_tokens", max_tokens);
+    /* json_mode: enforce a JSON reply — the commit generation's retry
+       (reasoning models echo or burn the cap under the plain protocol) */
+    if (json_mode) {
+        cJSON *rf = cJSON_CreateObject();
+        cJSON_AddStringToObject(rf, "type", "json_object");
+        cJSON_AddItemToObject(root, "response_format", rf);
+    }
     cJSON_AddBoolToObject(root, "stream", 1);
 
     /* stream_options */
@@ -414,10 +428,11 @@ void api_response_free(api_response *resp)
 }
 
 int api_chat(const jb_config *cfg, const char *sys_prompt, cJSON *messages,
-             cJSON *tools, api_response *resp, sse_delta_cb on_delta,
-             void *delta_userdata)
+             cJSON *tools, long max_tokens, int json_mode,
+             api_response *resp, sse_delta_cb on_delta, void *delta_userdata)
 {
-    char *body = build_request_body(cfg, sys_prompt, messages, tools);
+    char *body = build_request_body(cfg, sys_prompt, messages, tools,
+                                    max_tokens, json_mode);
     if (!body) return -1;
 
     /* Build the URL: api_url + "/chat/completions" */

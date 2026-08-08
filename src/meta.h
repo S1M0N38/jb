@@ -26,6 +26,13 @@ int jb_resolve_id_arg(const char *repo_root, const char *arg,
 /* mkdir -p for a single path (all intermediate components) */
 int mkdirs(const char *path);
 
+/* jb_read_file — read a whole file into a malloc'd NUL-terminated buffer
+   (caller frees), or NULL when it cannot be read. */
+char *jb_read_file(const char *path);
+
+/* jb_short_id — first 8 hex chars of a uuid (the log/status id form) */
+void jb_short_id(const char *uuid, char *out, size_t outlen);
+
 /* jb path ID — print the absolute session directory. 0 · 1 not found · 2 usage */
 int cmd_path(const char *id_arg);
 
