@@ -18,9 +18,93 @@ static jb_session g_session;
 static int g_session_active = 0;
 static char *g_partial_answer = NULL;
 
+/* JSON-escape a string into out — allocation-free, safe for the signal
+   handler. Truncates when out is nearly full. */
+static void json_escape(const char *in, char *out, size_t outlen);
+
+/* provider = hostname of api_url, reference §3.4: */
+static void provider_from_url(const char *api_url, char *out, size_t outlen);
+
+static void json_escape(const char *in, char *out, size_t outlen)
+{
+    size_t o = 0;
+    for (const unsigned char *p = (const unsigned char *)in; *p && o + 7 < outlen; p++) {
+        switch (*p) {
+        case '"':  out[o++] = '\\'; out[o++] = '"'; break;
+        case '\\': out[o++] = '\\'; out[o++] = '\\'; break;
+        case '\n': out[o++] = '\\'; out[o++] = 'n'; break;
+        case '\r': out[o++] = '\\'; out[o++] = 'r'; break;
+        case '\t': out[o++] = '\\'; out[o++] = 't'; break;
+        default:
+            if (*p < 0x20) {
+                snprintf(out + o, outlen - o, "\\u%04x", *p);
+                o += 6;
+            } else {
+                out[o++] = (char)*p;
+            }
+        }
+    }
+    out[o] = '\0';
+}
+
 static void handle_signal(int sig)
 {
     if (g_session_active) {
+        /* Aborted assistant entry + interrupted metadata before dying.
+           The entry line is hand-built with snprintf — a signal handler
+           must not run cJSON/malloc (the interrupted code may hold the
+           allocator lock). Skipped when no header has been written yet
+           (the prompt never arrived — nothing to chain to).
+           Caveat: session_write_metadata_close uses cJSON; in practice
+           SIGINT lands while jb is blocked reading the SSE stream, where
+           no allocation is in progress. */
+        if (ftell(g_session.session_fp) > 0) {
+            char id8[16], ts[40], ptext[4096], esc[8192];
+            jb_id8(id8, sizeof(id8));
+            jb_iso8601_ms(ts, sizeof(ts));
+            api_stream_text_snapshot(ptext, sizeof(ptext));
+            json_escape(ptext, esc, sizeof(esc));
+
+            /* provider/model from the config snapshot — empty when the
+               run never got past reading stdin (§3.3 shape) */
+            char provider[128], provq[160], modelq[160];
+            provider_from_url(g_session.cfg_snapshot.api_url, provider, sizeof(provider));
+            if (g_session.cfg_snapshot.model[0] && provider[0]) {
+                snprintf(provq, sizeof(provq), "\"provider\":\"%s\",", provider);
+                snprintf(modelq, sizeof(modelq), "\"model\":\"%s\",", g_session.cfg_snapshot.model);
+            } else {
+                snprintf(provq, sizeof(provq), "");
+                snprintf(modelq, sizeof(modelq), "");
+            }
+
+            char block[8256];
+            if (esc[0]) {
+                snprintf(block, sizeof(block),
+                    "[{\"type\":\"text\",\"text\":\"%s\"}]", esc);
+            } else {
+                snprintf(block, sizeof(block), "[]");
+            }
+
+            char parentq[24];
+            if (g_session.last_entry_id[0]) {
+                snprintf(parentq, sizeof(parentq), "\"%s\"", g_session.last_entry_id);
+            } else {
+                snprintf(parentq, sizeof(parentq), "null");
+            }
+
+            char line[12288];
+            snprintf(line, sizeof(line),
+                "{\"type\":\"message\",\"id\":\"%s\",\"parentId\":%s,"
+                "\"timestamp\":\"%s\","
+                "\"message\":{\"role\":\"assistant\",\"content\":%s,"
+                "%s%s"
+                "\"api\":\"openai-completions\",\"stopReason\":\"aborted\","
+                "\"errorMessage\":\"interrupted by signal %d\",\"timestamp\":%ld}}",
+                id8, parentq, ts, block, provq, modelq, sig, jb_epoch_ms());
+            session_append_raw(&g_session, line);
+        }
+        session_write_metadata_close(&g_session, "interrupted", 0, 0,
+                                     sig == SIGINT ? 130 : 143);
         session_close(&g_session);
         g_session_active = 0;
     }
@@ -174,18 +258,18 @@ static int find_repo(const char *start, char *out, size_t outlen)
 }
 
 /* Retry wrapper for api_chat — retries on transient errors */
-static int api_chat_with_retry(const jb_config *cfg, cJSON *messages, cJSON *tools,
-                               api_response *resp);
+static int api_chat_with_retry(const jb_config *cfg, const char *sys_prompt,
+                               cJSON *messages, cJSON *tools, api_response *resp);
 
 static int cmd_run(const char *config_path, const char *argv0, int run_argc, char **run_argv);
-static int api_chat_with_retry(const jb_config *cfg, cJSON *messages, cJSON *tools,
-                               api_response *resp)
+static int api_chat_with_retry(const jb_config *cfg, const char *sys_prompt,
+                               cJSON *messages, cJSON *tools, api_response *resp)
 {
     int max_retries = 3;
     int base_delay = 2;  /* seconds */
 
     for (int attempt = 0; attempt <= max_retries; attempt++) {
-        int rc = api_chat(cfg, messages, tools, resp);
+        int rc = api_chat(cfg, sys_prompt, messages, tools, resp);
 
         if (rc == 0) return 0;
 
@@ -205,6 +289,139 @@ static int api_chat_with_retry(const jb_config *cfg, cJSON *messages, cJSON *too
     }
 
     return -1;
+}
+
+/* ---- pi-format message builders (§3.3) ---- */
+
+/* usage object — zeros when the provider sends nothing (jb has no pricing) */
+static cJSON *usage_object(long prompt_tokens, long completion_tokens,
+                           long reasoning_tokens, long total_tokens)
+{
+    cJSON *u = cJSON_CreateObject();
+    cJSON_AddNumberToObject(u, "input", prompt_tokens);
+    cJSON_AddNumberToObject(u, "output", completion_tokens);
+    cJSON_AddNumberToObject(u, "cacheRead", 0);
+    cJSON_AddNumberToObject(u, "cacheWrite", 0);
+    cJSON_AddNumberToObject(u, "reasoning", reasoning_tokens);
+    cJSON_AddNumberToObject(u, "totalTokens", total_tokens);
+    cJSON *cost = cJSON_CreateObject();
+    cJSON_AddNumberToObject(cost, "input", 0);
+    cJSON_AddNumberToObject(cost, "output", 0);
+    cJSON_AddNumberToObject(cost, "cacheRead", 0);
+    cJSON_AddNumberToObject(cost, "cacheWrite", 0);
+    cJSON_AddNumberToObject(cost, "total", 0);
+    cJSON_AddItemToObject(u, "cost", cost);
+    return u;
+}
+
+/* provider = hostname of api_url, reference §3.4:
+   api.openai.com→openai, localhost:11434→ollama, else the host. */
+static void provider_from_url(const char *api_url, char *out, size_t outlen)
+{
+    const char *p = api_url;
+    const char *scheme = strstr(p, "://");
+    if (scheme) p = scheme + 3;
+
+    const char *end = p;
+    while (*end && *end != '/' && *end != ':') end++;
+
+    size_t len = (size_t)(end - p);
+    if (len >= outlen) len = outlen - 1;
+    memcpy(out, p, len);
+    out[len] = '\0';
+
+    /* localhost:11434 → ollama */
+    if (strcmp(out, "localhost") == 0 && *end == ':') {
+        const char *port = end + 1;
+        if (strncmp(port, "11434", 5) == 0 && (port[5] == '\0' || port[5] == '/')) {
+            snprintf(out, outlen, "ollama");
+            return;
+        }
+    }
+    /* api.openai.com → openai: drop the api. prefix and the .com suffix */
+    if (strncmp(out, "api.", 4) == 0)
+        memmove(out, out + 4, strlen(out + 4) + 1);
+    size_t olen = strlen(out);
+    if (olen > 4 && strcmp(out + olen - 4, ".com") == 0)
+        out[olen - 4] = '\0';
+}
+
+/* Assistant message from a completed api_response. stop_reason ∈
+   {toolUse, stop, error}; error_message only for error. */
+static cJSON *assistant_message(const jb_config *cfg, const api_response *resp,
+                                const char *stop_reason, const char *error_message)
+{
+    cJSON *msg = cJSON_CreateObject();
+    cJSON_AddStringToObject(msg, "role", "assistant");
+
+    cJSON *content = cJSON_CreateArray();
+    /* text block — omitted when empty; never for error replies */
+    if (strcmp(stop_reason, "error") != 0 && resp->text && resp->text[0]) {
+        cJSON *block = cJSON_CreateObject();
+        cJSON_AddStringToObject(block, "type", "text");
+        cJSON_AddStringToObject(block, "text", resp->text);
+        cJSON_AddItemToArray(content, block);
+    }
+    /* toolCall blocks — parsed arguments OBJECT, not a string (§3.4) */
+    if (resp->tool_calls_arr) {
+        int n = cJSON_GetArraySize(resp->tool_calls_arr);
+        for (int i = 0; i < n; i++) {
+            cJSON *tc = cJSON_GetArrayItem(resp->tool_calls_arr, i);
+            const char *id = cJSON_GetObjectItemCaseSensitive(tc, "id")->valuestring;
+            const char *name = cJSON_GetObjectItemCaseSensitive(tc, "name")->valuestring;
+            const char *args = cJSON_GetObjectItemCaseSensitive(tc, "arguments")->valuestring;
+            cJSON *block = cJSON_CreateObject();
+            cJSON_AddStringToObject(block, "type", "toolCall");
+            cJSON_AddStringToObject(block, "id", id);
+            cJSON_AddStringToObject(block, "name", name);
+            cJSON *parsed = cJSON_Parse(args ? args : "");
+            if (!parsed) parsed = cJSON_CreateObject();
+            cJSON_AddItemToObject(block, "arguments", parsed);
+            cJSON_AddItemToArray(content, block);
+        }
+    }
+    cJSON_AddItemToObject(msg, "content", content);
+
+    cJSON_AddStringToObject(msg, "api", "openai-completions");
+    char provider[128];
+    provider_from_url(cfg->api_url, provider, sizeof(provider));
+    cJSON_AddStringToObject(msg, "provider", provider);
+    cJSON_AddStringToObject(msg, "model", cfg->model);
+    cJSON_AddItemToObject(msg, "usage",
+        usage_object(resp->prompt_tokens, resp->completion_tokens,
+                     resp->reasoning_tokens, resp->total_tokens));
+    cJSON_AddStringToObject(msg, "stopReason", stop_reason);
+    if (error_message && error_message[0])
+        cJSON_AddStringToObject(msg, "errorMessage", error_message);
+    cJSON_AddNumberToObject(msg, "timestamp", jb_epoch_ms());
+    return msg;
+}
+
+/* toolResult message — one per executed tool */
+static cJSON *tool_result_message(const char *call_id, const char *name,
+                                  const char *result, int is_error)
+{
+    cJSON *msg = cJSON_CreateObject();
+    cJSON_AddStringToObject(msg, "role", "toolResult");
+    cJSON_AddStringToObject(msg, "toolCallId", call_id);
+    cJSON_AddStringToObject(msg, "toolName", name);
+    cJSON *content = cJSON_CreateArray();
+    cJSON *block = cJSON_CreateObject();
+    cJSON_AddStringToObject(block, "type", "text");
+    cJSON_AddStringToObject(block, "text", result);
+    cJSON_AddItemToArray(content, block);
+    cJSON_AddItemToObject(msg, "content", content);
+    cJSON_AddBoolToObject(msg, "isError", is_error);
+    cJSON_AddNumberToObject(msg, "timestamp", jb_epoch_ms());
+    return msg;
+}
+
+/* isError: bash non-zero exit ([exit code: N]) or result starts with "Error:" */
+static int tool_result_is_error(const char *result)
+{
+    if (strncmp(result, "Error:", 6) == 0) return 1;
+    if (strstr(result, "[exit code:") != NULL) return 1;
+    return 0;
 }
 
 int main(int argc, char **argv)
@@ -378,55 +595,30 @@ static int cmd_run(const char *config_path, const char *argv0, int run_argc, cha
 
     /* session.jsonl + events.jsonl: v3 header, then the user entry */
     session_write_header(sess, cwd);
-    {
-        char id8[16], ets[40];
-        jb_id8(id8, sizeof(id8));
-        jb_iso8601_ms(ets, sizeof(ets));
 
-        cJSON *entry = cJSON_CreateObject();
-        cJSON_AddStringToObject(entry, "type", "message");
-        cJSON_AddStringToObject(entry, "id", id8);
-        cJSON_AddNullToObject(entry, "parentId");
-        cJSON_AddStringToObject(entry, "timestamp", ets);
-        cJSON *msg = cJSON_CreateObject();
-        cJSON_AddStringToObject(msg, "role", "user");
-        cJSON *content = cJSON_CreateArray();
-        cJSON *block = cJSON_CreateObject();
-        cJSON_AddStringToObject(block, "type", "text");
-        cJSON_AddStringToObject(block, "text", user_prompt);
-        cJSON_AddItemToArray(content, block);
-        cJSON_AddItemToObject(msg, "content", content);
-        cJSON_AddNumberToObject(msg, "timestamp", jb_epoch_ms());
-        cJSON_AddItemToObject(entry, "message", msg);
-
-        char *s = cJSON_PrintUnformatted(entry);
-        cJSON_Delete(entry);
-        if (s) {
-            session_append_pi(sess, s);
-            free(s);
-        }
-    }
-
-    /* Build initial messages array */
+    /* Build the initial messages array — pi format (§3.3). The wire body is
+       derived in build_request_body(); the system prompt is prepended at
+       request time and never persisted. */
     cJSON *messages = cJSON_CreateArray();
 
-    /* Build system prompt */
-    char *sys_prompt = prompt_build();
-
-    /* System message */
-    cJSON *sys_msg = cJSON_CreateObject();
-    cJSON_AddStringToObject(sys_msg, "role", "system");
-    cJSON_AddStringToObject(sys_msg, "content", sys_prompt);
-    cJSON_AddItemToArray(messages, sys_msg);
-    free(sys_prompt);
-
-    /* User message */
+    /* User message: persisted via session_append_message (entry base: id,
+       parentId, timestamps), then owned by the messages array. */
     cJSON *user_msg = cJSON_CreateObject();
     cJSON_AddStringToObject(user_msg, "role", "user");
-    cJSON_AddStringToObject(user_msg, "content", user_prompt);
+    cJSON *ucontent = cJSON_CreateArray();
+    cJSON *ublock = cJSON_CreateObject();
+    cJSON_AddStringToObject(ublock, "type", "text");
+    cJSON_AddStringToObject(ublock, "text", user_prompt);
+    cJSON_AddItemToArray(ucontent, ublock);
+    cJSON_AddItemToObject(user_msg, "content", ucontent);
+    cJSON_AddNumberToObject(user_msg, "timestamp", jb_epoch_ms());
+    session_append_message(sess, user_msg);
     cJSON_AddItemToArray(messages, user_msg);
 
     free(user_prompt);
+
+    /* Build system prompt (kept for the whole run — prepended per request) */
+    char *sys_prompt = prompt_build();
 
     /* Get tool definitions */
     cJSON *tools = tools_get_definitions();
@@ -449,11 +641,16 @@ static int cmd_run(const char *config_path, const char *argv0, int run_argc, cha
         api_response resp;
         api_response_init(&resp);
 
-        int rc = api_chat_with_retry(&cfg, messages, tools, &resp);
+        int rc = api_chat_with_retry(&cfg, sys_prompt, messages, tools, &resp);
 
         if (rc != 0) {
-            /* API error after retries */
+            /* API error after retries — record it, stop */
             exit_code = 1;
+            cJSON *err_msg = assistant_message(&cfg, &resp, "error",
+                resp.text ? resp.text : "API error");
+            session_append_message(sess, err_msg);
+            cJSON_AddItemToArray(messages, err_msg);
+            free(resp.text);
             break;
         }
 
@@ -461,40 +658,20 @@ static int cmd_run(const char *config_path, const char *argv0, int run_argc, cha
         total_tokens += resp.total_tokens;
 
         if (resp.finish_tool_calls && resp.tool_calls_arr) {
-            /* Model wants to call tools */
-            cJSON *assistant_msg = cJSON_CreateObject();
-            cJSON_AddStringToObject(assistant_msg, "role", "assistant");
+            /* Model wants to call tools — pi-format assistant message with
+               toolCall blocks, persisted like every other entry */
+            cJSON *assistant_msg = assistant_message(&cfg, &resp, "toolUse", NULL);
+            session_append_message(sess, assistant_msg);
+            cJSON_AddItemToArray(messages, assistant_msg);
 
             if (resp.text && resp.text[0]) {
-                cJSON_AddStringToObject(assistant_msg, "content", resp.text);
                 /* Track partial answer for signal handler */
                 free(g_partial_answer);
                 g_partial_answer = strdup(resp.text);
-            } else {
-                cJSON_AddNullToObject(assistant_msg, "content");
             }
 
-            /* Build tool_calls array in API format */
-            cJSON *tc_api = cJSON_CreateArray();
+            /* Execute each tool; each result becomes a toolResult entry */
             int n_tc = cJSON_GetArraySize(resp.tool_calls_arr);
-            for (int i = 0; i < n_tc; i++) {
-                cJSON *tc = cJSON_GetArrayItem(resp.tool_calls_arr, i);
-                cJSON *tc_obj = cJSON_CreateObject();
-                const char *id = cJSON_GetObjectItemCaseSensitive(tc, "id")->valuestring;
-                const char *name = cJSON_GetObjectItemCaseSensitive(tc, "name")->valuestring;
-                const char *args = cJSON_GetObjectItemCaseSensitive(tc, "arguments")->valuestring;
-                cJSON_AddStringToObject(tc_obj, "id", id);
-                cJSON_AddStringToObject(tc_obj, "type", "function");
-                cJSON *fn = cJSON_CreateObject();
-                cJSON_AddStringToObject(fn, "name", name);
-                cJSON_AddStringToObject(fn, "arguments", args);
-                cJSON_AddItemToObject(tc_obj, "function", fn);
-                cJSON_AddItemToArray(tc_api, tc_obj);
-            }
-            cJSON_AddItemToObject(assistant_msg, "tool_calls", tc_api);
-            cJSON_AddItemToArray(messages, assistant_msg);
-
-            /* Execute each tool and add results */
             for (int i = 0; i < n_tc; i++) {
                 cJSON *tc = cJSON_GetArrayItem(resp.tool_calls_arr, i);
                 const char *id = cJSON_GetObjectItemCaseSensitive(tc, "id")->valuestring;
@@ -503,10 +680,9 @@ static int cmd_run(const char *config_path, const char *argv0, int run_argc, cha
 
                 char *result = tool_execute(name, args);
 
-                cJSON *tool_msg = cJSON_CreateObject();
-                cJSON_AddStringToObject(tool_msg, "role", "tool");
-                cJSON_AddStringToObject(tool_msg, "tool_call_id", id);
-                cJSON_AddStringToObject(tool_msg, "content", result);
+                cJSON *tool_msg = tool_result_message(id, name, result,
+                                                      tool_result_is_error(result));
+                session_append_message(sess, tool_msg);
                 cJSON_AddItemToArray(messages, tool_msg);
                 free(result);
             }
@@ -522,17 +698,17 @@ static int cmd_run(const char *config_path, const char *argv0, int run_argc, cha
             fflush(stdout);
             free(g_partial_answer);
             g_partial_answer = strdup(resp.text);
-
-            /* Persist final assistant message (in-memory for the API loop;
-               session.jsonl assistant entries land in phase 3) */
-            cJSON *final_msg = cJSON_CreateObject();
-            cJSON_AddStringToObject(final_msg, "role", "assistant");
-            cJSON_AddStringToObject(final_msg, "content", resp.text);
-            cJSON_AddItemToArray(messages, final_msg);
         }
+
+        /* Persist the assistant entry — session.jsonl is the record */
+        cJSON *final_msg = assistant_message(&cfg, &resp, "stop", NULL);
+        session_append_message(sess, final_msg);
+        cJSON_AddItemToArray(messages, final_msg);
         free(resp.text);
         break;
     }
+
+    free(sys_prompt);
 
     /* Write final metadata (status: completed|error) */
     {

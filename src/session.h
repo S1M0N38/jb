@@ -19,6 +19,10 @@ typedef struct {
     char working_dir[4096];     /* cwd at session start */
     char author[JB_UUID_LEN];   /* creator: $JB_SESSION or "" (human) */
     jb_config cfg_snapshot;     /* config snapshot for metadata close */
+    char last_entry_id[16];     /* id of the last appended entry (parentId chain) */
+    char **used_ids;            /* collision check for generated entry ids */
+    int used_n;
+    int used_cap;
     FILE *session_fp;
     FILE *events_fp;
 } jb_session;
@@ -37,6 +41,19 @@ int session_append_pi(jb_session *sess, const char *json_line);
 
 /* Append a JSON line to events.jsonl. Returns 0 on success. */
 int session_append_event(jb_session *sess, const char *json_line);
+
+/* Wrap a pi-format message object (§3.3) into a message entry and append it
+   to session.jsonl: assigns a collision-checked 8-hex id, the parentId chain
+   (null for the first entry, else the previous entry's id), and an ISO-ms
+   timestamp. The message is added BY REFERENCE — the caller keeps ownership
+   (typically via the in-memory messages array).
+   Returns 0 on success, -1 on error. */
+int session_append_message(jb_session *sess, cJSON *message);
+
+/* Append a pre-built JSON line to session.jsonl WITHOUT updating the entry
+   chain (used by the signal handler, which cannot run cJSON/malloc).
+   Returns 0 on success. */
+int session_append_raw(jb_session *sess, const char *json_line);
 
 /* Write initial metadata.json (status: working, subject, config snapshot).
    Returns 0 on success, -1 on error. */

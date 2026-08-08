@@ -24,11 +24,18 @@ typedef struct {
     /* Usage */
     long prompt_tokens;
     long completion_tokens;
+    long reasoning_tokens;
     long total_tokens;
 
     /* Done flag */
     int done;
 } sse_state;
+
+/* Points at the active sse_state's text while a stream is in flight — the
+   SIGINT handler snapshots it. NULL between api_chat calls (the buffer is
+   freed), so it is only valid while the main thread is inside the read
+   loop. */
+static const char *g_stream_text = NULL;
 
 static void sse_state_init(sse_state *st)
 {
@@ -53,9 +60,14 @@ static void text_append(sse_state *st, const char *s)
         st->text_cap *= 2;
         st->text = realloc(st->text, st->text_cap);
     }
+    /* Keep the snapshot pointer valid and NUL-terminated at every
+       instruction boundary: assigned only after realloc, and the terminator
+       is written BEFORE the copy, so a signal landing mid-append can never
+       read a freed buffer or run past the end. */
+    g_stream_text = st->text;
+    st->text[st->text_len + slen] = '\0';
     memcpy(st->text + st->text_len, s, slen);
     st->text_len += slen;
-    st->text[st->text_len] = '\0';
 }
 
 /* Find or create a tool call accumulator by index */
@@ -170,17 +182,139 @@ static void process_sse_data(sse_state *st, const char *data)
         if (ct && cJSON_IsNumber(ct)) st->completion_tokens = (long)ct->valuedouble;
         cJSON *tt = cJSON_GetObjectItemCaseSensitive(usage, "total_tokens");
         if (tt && cJSON_IsNumber(tt)) st->total_tokens = (long)tt->valuedouble;
+        /* completion_tokens_details.reasoning_tokens (0 if absent) */
+        cJSON *ctd = cJSON_GetObjectItemCaseSensitive(usage, "completion_tokens_details");
+        if (ctd) {
+            cJSON *rt = cJSON_GetObjectItemCaseSensitive(ctd, "reasoning_tokens");
+            if (rt && cJSON_IsNumber(rt)) st->reasoning_tokens = (long)rt->valuedouble;
+        }
     }
 
     cJSON_Delete(root);
 }
 
+/* ---- Wire conversion (§4): pi-format messages → OpenAI wire ----
+   The in-memory message array IS the pi format (§3.3). The wire body is
+   built from it here — nowhere else. The system prompt is prepended at
+   request time and never persisted. */
+
+/* Join the text blocks of a pi message into one string ("" if none). */
+static char *pi_joined_text(const cJSON *msg)
+{
+    const cJSON *content = cJSON_GetObjectItemCaseSensitive(msg, "content");
+    if (!content || !cJSON_IsArray(content) || cJSON_GetArraySize(content) == 0)
+        return strdup("");
+
+    size_t len = 0, cap = 0;
+    char *buf = NULL;
+    for (int i = 0; i < cJSON_GetArraySize(content); i++) {
+        const cJSON *b = cJSON_GetArrayItem(content, i);
+        const cJSON *t = cJSON_GetObjectItemCaseSensitive(b, "text");
+        if (!t || !cJSON_IsString(t)) continue;
+        size_t sl = strlen(t->valuestring);
+        if (len + sl + 1 > cap) {
+            cap = cap ? cap * 2 : 256;
+            while (cap < len + sl + 1) cap *= 2;
+            buf = realloc(buf, cap);
+        }
+        memcpy(buf + len, t->valuestring, sl);
+        len += sl;
+    }
+    if (!buf) return strdup("");
+    buf[len] = '\0';
+    return buf;
+}
+
+/* toolCall blocks of a pi assistant message → wire tool_calls array. */
+static cJSON *pi_toolcalls_to_wire(const cJSON *msg)
+{
+    const cJSON *content = cJSON_GetObjectItemCaseSensitive(msg, "content");
+    if (!content || !cJSON_IsArray(content)) return NULL;
+
+    cJSON *arr = cJSON_CreateArray();
+    for (int i = 0; i < cJSON_GetArraySize(content); i++) {
+        const cJSON *b = cJSON_GetArrayItem(content, i);
+        const cJSON *type = cJSON_GetObjectItemCaseSensitive(b, "type");
+        if (!type || !cJSON_IsString(type) || strcmp(type->valuestring, "toolCall") != 0)
+            continue;
+
+        const cJSON *id = cJSON_GetObjectItemCaseSensitive(b, "id");
+        const cJSON *name = cJSON_GetObjectItemCaseSensitive(b, "name");
+        const cJSON *args = cJSON_GetObjectItemCaseSensitive(b, "arguments");
+        if (!id || !cJSON_IsString(id) || !name || !cJSON_IsString(name)) continue;
+
+        cJSON *tc = cJSON_CreateObject();
+        cJSON_AddStringToObject(tc, "id", id->valuestring);
+        cJSON_AddStringToObject(tc, "type", "function");
+        cJSON *fn = cJSON_CreateObject();
+        cJSON_AddStringToObject(fn, "name", name->valuestring);
+        if (args && cJSON_IsObject(args)) {
+            char *a = cJSON_PrintUnformatted(args);
+            cJSON_AddStringToObject(fn, "arguments", a ? a : "{}");
+            free(a);
+        } else {
+            cJSON_AddStringToObject(fn, "arguments", "{}");
+        }
+        cJSON_AddItemToObject(tc, "function", fn);
+        cJSON_AddItemToArray(arr, tc);
+    }
+    if (cJSON_GetArraySize(arr) == 0) {
+        cJSON_Delete(arr);
+        return NULL;
+    }
+    return arr;
+}
+
 /* Build the curl command and pipe its stdout */
-static char *build_request_body(const jb_config *cfg, cJSON *messages, cJSON *tools)
+static char *build_request_body(const jb_config *cfg, const char *sys_prompt,
+                                cJSON *messages, cJSON *tools)
 {
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "model", cfg->model);
-    cJSON_AddItemReferenceToObject(root, "messages", messages);
+
+    cJSON *wire = cJSON_CreateArray();
+
+    /* System prompt: prepended at request time — never persisted */
+    cJSON *sys = cJSON_CreateObject();
+    cJSON_AddStringToObject(sys, "role", "system");
+    cJSON_AddStringToObject(sys, "content", sys_prompt ? sys_prompt : "");
+    cJSON_AddItemToArray(wire, sys);
+
+    for (const cJSON *m = messages->child; m; m = m->next) {
+        const cJSON *role = cJSON_GetObjectItemCaseSensitive(m, "role");
+        if (!role || !cJSON_IsString(role)) continue;
+        const char *r = role->valuestring;
+
+        cJSON *wm = cJSON_CreateObject();
+        if (strcmp(r, "user") == 0) {
+            cJSON_AddStringToObject(wm, "role", "user");
+            char *text = pi_joined_text(m);
+            cJSON_AddStringToObject(wm, "content", text ? text : "");
+            free(text);
+        } else if (strcmp(r, "assistant") == 0) {
+            cJSON_AddStringToObject(wm, "role", "assistant");
+            char *text = pi_joined_text(m);
+            if (text && text[0]) {
+                cJSON_AddStringToObject(wm, "content", text);
+            } else {
+                cJSON_AddNullToObject(wm, "content");
+            }
+            free(text);
+            cJSON *tcs = pi_toolcalls_to_wire(m);
+            if (tcs) cJSON_AddItemToObject(wm, "tool_calls", tcs);
+        } else if (strcmp(r, "toolResult") == 0) {
+            cJSON_AddStringToObject(wm, "role", "tool");
+            const cJSON *tcid = cJSON_GetObjectItemCaseSensitive(m, "toolCallId");
+            cJSON_AddStringToObject(wm, "tool_call_id",
+                tcid && cJSON_IsString(tcid) ? tcid->valuestring : "");
+            char *text = pi_joined_text(m);
+            cJSON_AddStringToObject(wm, "content", text ? text : "");
+            free(text);
+        }
+        cJSON_AddItemToArray(wire, wm);
+    }
+
+    cJSON_AddItemToObject(root, "messages", wire);
     cJSON_AddItemReferenceToObject(root, "tools", tools);
     cJSON_AddBoolToObject(root, "stream", 1);
 
@@ -206,9 +340,10 @@ void api_response_free(api_response *resp)
     /* tool_calls_arr is owned by caller or not allocated */
 }
 
-int api_chat(const jb_config *cfg, cJSON *messages, cJSON *tools, api_response *resp)
+int api_chat(const jb_config *cfg, const char *sys_prompt, cJSON *messages,
+             cJSON *tools, api_response *resp)
 {
-    char *body = build_request_body(cfg, messages, tools);
+    char *body = build_request_body(cfg, sys_prompt, messages, tools);
     if (!body) return -1;
 
     /* Build the URL: api_url + "/chat/completions" */
@@ -262,6 +397,7 @@ int api_chat(const jb_config *cfg, cJSON *messages, cJSON *tools, api_response *
                     char *err_msg = cJSON_PrintUnformatted(err_obj);
                     resp->text = err_msg;
                     cJSON_Delete(err);
+                    g_stream_text = NULL;
                     pclose(fp);
                     remove(tmpfile);
                     return -1;
@@ -292,12 +428,17 @@ int api_chat(const jb_config *cfg, cJSON *messages, cJSON *tools, api_response *
     resp->text = st.text;
     st.text = NULL;  /* transfer ownership */
     resp->total_tokens = st.total_tokens;
+    resp->prompt_tokens = st.prompt_tokens;
+    resp->completion_tokens = st.completion_tokens;
+    resp->reasoning_tokens = st.reasoning_tokens;
 
     if (strcmp(st.finish_reason, "tool_calls") == 0) {
         resp->finish_tool_calls = 1;
         /* Convert accumulated tool calls to proper array */
         resp->tool_calls_arr = cJSON_Duplicate(st.tc_array, 1);
     }
+
+    g_stream_text = NULL;  /* the buffer is about to be freed */
 
     if (curl_status != 0 && !st.done && st.text_len == 0) {
         sse_state_free(&st);
@@ -306,4 +447,14 @@ int api_chat(const jb_config *cfg, cJSON *messages, cJSON *tools, api_response *
 
     sse_state_free(&st);
     return 0;
+}
+
+void api_stream_text_snapshot(char *out, size_t outlen)
+{
+    if (!g_stream_text || !g_stream_text[0]) {
+        out[0] = '\0';
+        return;
+    }
+    strncpy(out, g_stream_text, outlen - 1);
+    out[outlen - 1] = '\0';
 }

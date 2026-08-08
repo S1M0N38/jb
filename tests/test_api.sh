@@ -34,8 +34,13 @@ case "$_head" in
     *'"type":"session"'*) pass "e2e: v3 header recorded" ;;
     *)                    fail "e2e: v3 header recorded" "got: $(echo "$_head" | head -c 100)" ;;
 esac
-_tail=$(tail -1 "$_latest/session.jsonl")
-case "$_tail" in
+_uentry=$(sed -n '2p' "$_latest/session.jsonl")
+case "$_uentry" in
     *'"role":"user"'*) pass "e2e: user message recorded" ;;
-    *)                 fail "e2e: user message recorded" "got: $(echo "$_tail" | head -c 100)" ;;
+    *)                 fail "e2e: user message recorded" "got: $(echo "$_uentry" | head -c 100)" ;;
+esac
+_atail=$(tail -1 "$_latest/session.jsonl")
+case "$_atail" in
+    *'"role":"assistant"'*) pass "e2e: assistant answer recorded" ;;
+    *)                        fail "e2e: assistant answer recorded" "got: $(echo "$_atail" | head -c 100)" ;;
 esac

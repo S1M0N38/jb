@@ -97,6 +97,63 @@ int session_append_pi(jb_session *sess, const char *json_line)
     return 0;
 }
 
+/* ---- Entry base (§3.2): id, parentId chain, ISO-ms timestamp ---- */
+
+static int id8_in_use(const jb_session *sess, const char *id8)
+{
+    for (int i = 0; i < sess->used_n; i++) {
+        if (strcmp(sess->used_ids[i], id8) == 0) return 1;
+    }
+    return 0;
+}
+
+static void id8_add_used(jb_session *sess, const char *id8)
+{
+    if (sess->used_n >= sess->used_cap) {
+        sess->used_cap = sess->used_cap ? sess->used_cap * 2 : 16;
+        sess->used_ids = realloc(sess->used_ids, (size_t)sess->used_cap * sizeof(char *));
+    }
+    sess->used_ids[sess->used_n] = strdup(id8);
+    sess->used_n++;
+}
+
+int session_append_message(jb_session *sess, cJSON *message)
+{
+    char id8[16], ts[40];
+    do {
+        jb_id8(id8, sizeof(id8));
+    } while (id8_in_use(sess, id8));
+    id8_add_used(sess, id8);
+    jb_iso8601_ms(ts, sizeof(ts));
+
+    cJSON *entry = cJSON_CreateObject();
+    cJSON_AddStringToObject(entry, "type", "message");
+    cJSON_AddStringToObject(entry, "id", id8);
+    if (sess->last_entry_id[0])
+        cJSON_AddStringToObject(entry, "parentId", sess->last_entry_id);
+    else
+        cJSON_AddNullToObject(entry, "parentId");
+    cJSON_AddStringToObject(entry, "timestamp", ts);
+    cJSON_AddItemReferenceToObject(entry, "message", message);
+
+    char *s = cJSON_PrintUnformatted(entry);
+    cJSON_Delete(entry);  /* reference — the message itself is NOT freed */
+    if (!s) return -1;
+
+    int rc = session_append_pi(sess, s);
+    if (rc == 0)
+        snprintf(sess->last_entry_id, sizeof(sess->last_entry_id), "%s", id8);
+    free(s);
+    return rc;
+}
+
+int session_append_raw(jb_session *sess, const char *json_line)
+{
+    /* Same write as session_append_pi; kept as a separate name so the
+       signal handler's intent is explicit (no chain bookkeeping). */
+    return session_append_pi(sess, json_line);
+}
+
 int session_append_event(jb_session *sess, const char *json_line)
 {
     if (!sess->events_fp) return -1;
@@ -262,4 +319,9 @@ void session_close(jb_session *sess)
 {
     if (sess->session_fp) { fclose(sess->session_fp); sess->session_fp = NULL; }
     if (sess->events_fp) { fclose(sess->events_fp); sess->events_fp = NULL; }
+    for (int i = 0; i < sess->used_n; i++) free(sess->used_ids[i]);
+    free(sess->used_ids);
+    sess->used_ids = NULL;
+    sess->used_n = 0;
+    sess->used_cap = 0;
 }
