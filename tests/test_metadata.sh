@@ -3,8 +3,8 @@
 # Run jb and verify metadata.json is created in session dir
 _output=$(echo "say OK" | "$JB" 2>/dev/null)
 
-_cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/jb/sessions"
-_latest=$(ls -td "$_cache_dir"/*/ 2>/dev/null | head -1)
+_cache_dir="$JB_SESSIONS_DIR"
+_latest=$(newest_session)
 
 if [ -z "$_latest" ]; then
     fail "metadata.json created" "no session dir found"
@@ -108,7 +108,7 @@ fi
 _long_prompt="This is a very long prompt that exceeds the sixty character limit for titles and should be truncated"
 _output2=$(printf '%s' "$_long_prompt" | "$JB" 2>/dev/null)
 
-_latest2=$(ls -td "$_cache_dir"/*/ 2>/dev/null | head -1)
+_latest2=$(newest_session)
 if [ -n "$_latest2" ] && [ -f "$_latest2/metadata.json" ]; then
     _title2=$(jq -r '.title // empty' "$_latest2/metadata.json" 2>/dev/null)
     _title_len=${#_title2}

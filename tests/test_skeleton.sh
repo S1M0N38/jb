@@ -4,7 +4,7 @@
 [ -x "$JB" ] && pass "jb binary exists" || fail "jb binary exists"
 
 # jb exits 3 when config/api-key missing
-_actual=$(echo "hello" | env -i HOME="/tmp/_jb_missing_$$" PATH="$PATH" "$JB" 2>/dev/null; echo $?)
+_actual=$(echo "hello" | env -i HOME="$SCRATCH/nohome" PATH="$PATH" "$JB" 2>/dev/null; echo $?)
 if [ "$_actual" -eq 3 ]; then
     pass "jb exits 3 on missing config"
 else

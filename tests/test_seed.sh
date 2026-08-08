@@ -1,6 +1,6 @@
 # test_seed.sh — --seed/--parent flags, $JB_SESSION env lineage, jb tool, session tree metadata
 
-_cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/jb/sessions"
+_cache_dir="$JB_SESSIONS_DIR"
 
 # --- Slice 1: --seed flag stores weak link (spawned_from) in metadata ---
 
@@ -14,7 +14,7 @@ else
     pass "jb --seed runs successfully"
 fi
 
-_latest=$(ls -td "$_cache_dir"/*/ 2>/dev/null | head -1)
+_latest=$(newest_session)
 
 if [ -z "$_latest" ]; then
     fail "seed metadata check" "no session dir found"
@@ -40,7 +40,7 @@ fi
 
 _legacy_uuid="bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
 _output1b=$(echo "say OK" | "$JB" --parent "$_legacy_uuid" 2>/dev/null)
-_latest1b=$(ls -td "$_cache_dir"/*/ 2>/dev/null | head -1)
+_latest1b=$(newest_session)
 if [ -n "$_latest1b" ] && [ -f "$_latest1b/metadata.json" ]; then
     _stored1b=$(jq -r '.spawned_from // empty' "$_latest1b/metadata.json" 2>/dev/null)
     if [ "$_stored1b" = "$_legacy_uuid" ]; then
@@ -53,7 +53,7 @@ fi
 # --- Slice 3: session without --seed should NOT have spawned_from field ---
 
 _output2=$(echo "say OK" | "$JB" 2>/dev/null)
-_latest2=$(ls -td "$_cache_dir"/*/ 2>/dev/null | head -1)
+_latest2=$(newest_session)
 
 if [ -n "$_latest2" ] && [ -f "$_latest2/metadata.json" ]; then
     _meta2=$(cat "$_latest2/metadata.json" 2>/dev/null)
@@ -71,7 +71,7 @@ fi
 
 _funky_seed="not-a-real-uuid"
 _output3=$(echo "say OK" | "$JB" --seed "$_funky_seed" 2>/dev/null)
-_latest3=$(ls -td "$_cache_dir"/*/ 2>/dev/null | head -1)
+_latest3=$(newest_session)
 
 if [ -n "$_latest3" ] && [ -f "$_latest3/metadata.json" ]; then
     _meta3=$(cat "$_latest3/metadata.json" 2>/dev/null)
@@ -89,7 +89,7 @@ fi
 
 _env_uuid="cccccccc-dddd-eeee-ffff-000000000000"
 _output4=$(JB_SESSION="$_env_uuid" echo "say OK" | JB_SESSION="$_env_uuid" "$JB" 2>/dev/null)
-_latest4=$(ls -td "$_cache_dir"/*/ 2>/dev/null | head -1)
+_latest4=$(newest_session)
 
 if [ -n "$_latest4" ] && [ -f "$_latest4/metadata.json" ]; then
     _stored4=$(jq -r '.spawned_from // empty' "$_latest4/metadata.json" 2>/dev/null)
@@ -103,7 +103,7 @@ fi
 # --- Slice 6: explicit --seed overrides $JB_SESSION env ---
 
 _output5=$(JB_SESSION="$_env_uuid" echo "say OK" | JB_SESSION="$_env_uuid" "$JB" --seed "$_seed_uuid" 2>/dev/null)
-_latest5=$(ls -td "$_cache_dir"/*/ 2>/dev/null | head -1)
+_latest5=$(newest_session)
 
 if [ -n "$_latest5" ] && [ -f "$_latest5/metadata.json" ]; then
     _stored5=$(jq -r '.spawned_from // empty' "$_latest5/metadata.json" 2>/dev/null)
@@ -115,8 +115,8 @@ if [ -n "$_latest5" ] && [ -f "$_latest5/metadata.json" ]; then
 fi
 
 # --- Slice 7: jb tool spawns child with weak link (spawned_from) ---
-# Clean sessions so we can identify parent/child cleanly
-rm -rf "${_cache_dir:?}"/*/
+# No shared-cache cleanup needed: this scratch starts empty and holds only
+# this file's sessions; child detection is by the spawned_from field
 
 # Run parent session that uses the jb tool
 _out=$(echo "Use the jb tool with prompt 'say exactly: OK'. Reply with just what the child returns." | "$JB" 2>/dev/null)

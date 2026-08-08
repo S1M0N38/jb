@@ -4,8 +4,8 @@
 _out=$(echo "say hello" | "$JB" 2>/dev/null)
 
 # Find latest session
-_cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/jb/sessions"
-_latest=$(ls -td "$_cache_dir"/*/ 2>/dev/null | head -1)
+_cache_dir="$JB_SESSIONS_DIR"
+_latest=$(newest_session)
 
 if [ -n "$_latest" ]; then
     _lines=$(wc -l < "$_latest/state.jsonl")

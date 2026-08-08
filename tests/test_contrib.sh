@@ -1,25 +1,35 @@
 # test_contrib.sh — contrib scripts (jb-list, jb-view)
 
+# ---- Self-contained: create a session in this scratch (real API call) ----
+# jb-list/jb-view scan the session store; with per-test isolation there are
+# no sessions to scan unless this test creates one itself. If the API is
+# unavailable the checks below skip, exactly as they did before isolation.
+_out=$(prompt_pong | "$JB" 2>/dev/null)
+if [ "$?" -eq 0 ]; then
+    pass "create session for contrib tests"
+else
+    skip "create session for contrib tests" "jb run failed — no session to scan"
+fi
+
 # ---- jb-list tests ----
 
 # jb-list should exist and be executable
-if [ -x "contrib/jb-list" ]; then
+if [ -x "$REPO_ROOT/contrib/jb-list" ]; then
     pass "jb-list script exists and is executable"
 else
     fail "jb-list script exists and is executable" "not found or not executable"
 fi
 
 # jb-view should exist and be executable (renamed from jb-watch)
-if [ -x "contrib/jb-view" ]; then
+if [ -x "$REPO_ROOT/contrib/jb-view" ]; then
     pass "jb-view script exists and is executable"
 else
     fail "jb-view script exists and is executable" "not found or not executable"
 fi
 
 # jb-list should output valid JSONL (one JSON object per line)
-_cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/jb/sessions"
-if [ -d "$_cache_dir" ] && ls "$_cache_dir"/*/metadata.json >/dev/null 2>&1; then
-    _list_output=$(contrib/jb-list 2>/dev/null)
+if ls "$JB_SESSIONS_DIR"/*/metadata.json >/dev/null 2>&1; then
+    _list_output=$("$REPO_ROOT/contrib/jb-list" 2>/dev/null)
     if [ -n "$_list_output" ]; then
         pass "jb-list produces output when sessions exist"
 
@@ -32,7 +42,7 @@ if [ -d "$_cache_dir" ] && ls "$_cache_dir"/*/metadata.json >/dev/null 2>&1; the
                 _jsonl_ok=0
             fi
         done
-        # Check at least one session was listed (we have sessions from metadata tests)
+        # Check at least one session was listed (we just created one)
         _first_line=$(echo "$_list_output" | head -1)
         if printf '%s' "$_first_line" | jq empty 2>/dev/null; then
             pass "jb-list outputs valid JSONL"
@@ -65,17 +75,17 @@ fi
 
 # jb-view --help or no args should show usage (or error about missing sessions is ok too)
 # We just verify it doesn't crash horribly
-_view_err=$(contrib/jb-view --help 2>&1 || true)
+_view_err=$("$REPO_ROOT/contrib/jb-view" --help 2>&1 || true)
 if [ -n "$_view_err" ] || [ $? -eq 0 ]; then
     pass "jb-view runs without crashing"
 else
     fail "jb-view runs without crashing" "unexpected error"
 fi
 
-# jb-view with a specific UUID from our test sessions
-_latest_session=$(ls -td "$_cache_dir"/*/ 2>/dev/null | head -1 | xargs basename 2>/dev/null)
-if [ -n "$_latest_session" ] && [ -f "$_cache_dir/$_latest_session/state.jsonl" ]; then
-    _view_output=$(contrib/jb-view "$_latest_session" 2>/dev/null) || true
+# jb-view with the uuid of the session created in this scratch
+_latest_session=$(basename "$(newest_session)" 2>/dev/null)
+if [ -n "$_latest_session" ] && [ -f "$JB_SESSIONS_DIR/$_latest_session/state.jsonl" ]; then
+    _view_output=$("$REPO_ROOT/contrib/jb-view" "$_latest_session" 2>/dev/null) || true
     if [ -n "$_view_output" ]; then
         pass "jb-view renders session output for UUID"
     else

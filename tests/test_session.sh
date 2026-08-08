@@ -7,8 +7,8 @@
 # Find the most recent session dir after running jb
 _output=$(echo "hello" | "$JB" 2>/dev/null)
 
-# Check that a session directory was created under XDG_CACHE_HOME
-_cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/jb/sessions"
+# Check that a session directory was created under the scratch cache
+_cache_dir="$JB_SESSIONS_DIR"
 if [ -d "$_cache_dir" ]; then
     pass "sessions directory exists"
 else
@@ -16,7 +16,7 @@ else
 fi
 
 # Find the latest session dir
-_latest=$(ls -td "$_cache_dir"/*/ 2>/dev/null | head -1)
+_latest=$(newest_session)
 if [ -n "$_latest" ]; then
     pass "session UUID directory created"
 

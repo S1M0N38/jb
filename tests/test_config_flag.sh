@@ -14,7 +14,7 @@ case "$_err" in
 esac
 
 # --config with nonexistent file → exit 3, stderr message
-_err2=$(echo "hi" | "$JB" --config /tmp/jb-nonexistent-config-test.json 2>&1 >/dev/null)
+_err2=$(echo "hi" | "$JB" --config "$SCRATCH/nonexistent-config-test.json" 2>&1 >/dev/null)
 _rc2=$?
 if [ "$_rc2" -eq 3 ]; then
     pass "--config with missing file exits 3"
@@ -27,7 +27,7 @@ case "$_err2" in
 esac
 
 # --config specified twice → exit 3, stderr message
-_tmpcfg=$(mktemp)
+_tmpcfg="$SCRATCH/cfg-dup.json"
 printf '{"model":"gpt-4.1"}' > "$_tmpcfg"
 _err3=$(echo "hi" | "$JB" --config "$_tmpcfg" --config "$_tmpcfg" 2>&1 >/dev/null)
 _rc3=$?
@@ -40,10 +40,9 @@ case "$_err3" in
     *"config"*|*"once"*|*"multiple"*) pass "--config twice prints error" ;;
     *)          fail "--config twice prints error" "got: $_err3" ;;
 esac
-rm -f "$_tmpcfg"
 
 # --config with valid file loads config (verify via metadata)
-_tmpcfg2=$(mktemp)
+_tmpcfg2="$SCRATCH/cfg-valid.json"
 _unique_model="test-config-flag-model"
 cat > "$_tmpcfg2" <<EOF
 {
@@ -56,8 +55,7 @@ cat > "$_tmpcfg2" <<EOF
 EOF
 _out=$(echo "say OK" | "$JB" --config "$_tmpcfg2" 2>/dev/null)
 _rc4=$?
-_cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/jb/sessions"
-_latest=$(ls -td "$_cache_dir"/*/ 2>/dev/null | head -1)
+_latest=$(newest_session)
 if [ -n "$_latest" ] && [ -f "$_latest/metadata.json" ]; then
     _meta_model=$(jq -r '.config.model // empty' "$_latest/metadata.json" 2>/dev/null)
     if [ "$_meta_model" = "$_unique_model" ]; then
@@ -74,22 +72,21 @@ if [ -n "$_latest" ] && [ -f "$_latest/metadata.json" ]; then
 else
     fail "--config loads specified config file" "no session metadata found"
 fi
-rm -f "$_tmpcfg2"
 
 # --config with relative path resolves correctly
-_mkdir=$(mktemp -d)
-_rel_cfg="$_mkdir/rel-config.json"
-cat > "$_rel_cfg" <<EOF
+_rel_dir="$SCRATCH/rel"
+mkdir -p "$_rel_dir"
+cat > "$_rel_dir/rel-config.json" <<EOF
 {
   "model": "relative-path-test",
   "max_tokens": 99999
 }
 EOF
-cd "$_mkdir"
-_out=$(echo "say OK" | "$OLDPWD/jb" --config rel-config.json 2>/dev/null)
-_rc5=$?
-cd "$OLDPWD"
-_latest2=$(ls -td "$_cache_dir"/*/ 2>/dev/null | head -1)
+(
+    cd "$_rel_dir" || exit 1
+    echo "say OK" | "$JB" --config rel-config.json >/dev/null 2>&1
+)
+_latest2=$(newest_session)
 if [ -n "$_latest2" ] && [ -f "$_latest2/metadata.json" ]; then
     _meta_model2=$(jq -r '.config.model // empty' "$_latest2/metadata.json" 2>/dev/null)
     if [ "$_meta_model2" = "relative-path-test" ]; then
@@ -100,19 +97,15 @@ if [ -n "$_latest2" ] && [ -f "$_latest2/metadata.json" ]; then
 else
     fail "--config resolves relative path correctly" "no session metadata found"
 fi
-rm -rf "$_mkdir"
 
 # Child jb process inherits --config from parent
-# Run parent with --config that uses the jb tool; verify child also used same config
-# Derive the child config from the user's real config (provider-agnostic), overriding max_tokens
-_child_cfg=$(mktemp)
+# Derive the child config from the scratch copy of the real config
+# (provider-agnostic), overriding max_tokens
+_child_cfg="$SCRATCH/cfg-child.json"
 _unique_max_tokens="77777"
-_real_cfg="${XDG_CONFIG_HOME:-$HOME/.config}/jb/config.json"
-if [ -f "$_real_cfg" ]; then
-    jq --arg t "$_unique_max_tokens" '.max_tokens = ($t|tonumber)' "$_real_cfg" > "$_child_cfg" 2>/dev/null
-fi
-# Fallback if no real config: a minimal provider-neutral config (will fail API, but child
-# inheritance is still verifiable via metadata if the parent errors out differently)
+jq --arg t "$_unique_max_tokens" '.max_tokens = ($t|tonumber)' "$SCRATCH/.config/jb/config.json" > "$_child_cfg" 2>/dev/null
+# Fallback if no real config was copied: a minimal provider-neutral config
+# (will fail API, but child inheritance is still verifiable via metadata)
 if [ ! -s "$_child_cfg" ]; then
     cat > "$_child_cfg" <<'TESTCFG'
 {
@@ -124,11 +117,8 @@ if [ ! -s "$_child_cfg" ]; then
 }
 TESTCFG
 fi
-# Clean sessions for clean child detection
-_cache_dir2="${XDG_CACHE_HOME:-$HOME/.cache}/jb/sessions"
-rm -rf "${_cache_dir2:?}"/*/
 
-# Run parent that spawns a child via jb tool
+# Run parent that spawns a child via jb tool; both sessions land in this scratch
 _out=$(echo "Use the jb tool with prompt 'say exactly: OK'. Reply with just what the child returns." | "$JB" --config "$_child_cfg" 2>/dev/null)
 _rc_child=$?
 if [ "$_rc_child" -eq 0 ]; then
@@ -139,10 +129,10 @@ fi
 
 # Find the child session (has spawned_from field in metadata — weak link)
 _found_child=0
-for _d in "$_cache_dir2"/*/; do
+for _d in "$JB_SESSIONS_DIR"/*/; do
     [ -f "${_d}metadata.json" ] || continue
-    _has_p=$(jq 'has("spawned_from")' "${_d}metadata.json" 2>/dev/null)
-    if [ "$_has_p" = "true" ]; then
+    _has_spawned=$(jq 'has("spawned_from")' "${_d}metadata.json" 2>/dev/null)
+    if [ "$_has_spawned" = "true" ]; then
         _c_tokens=$(jq -r '.config.max_tokens // empty' "${_d}metadata.json" 2>/dev/null)
         if [ "$_c_tokens" = "$_unique_max_tokens" ]; then
             pass "child jb inherits --config: child uses parent config"
@@ -156,4 +146,3 @@ done
 if [ "$_found_child" -eq 0 ]; then
     fail "child jb inherits --config: child uses parent config" "no child session found"
 fi
-rm -f "$_child_cfg"

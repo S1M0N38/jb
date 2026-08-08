@@ -1,11 +1,11 @@
 # test_fork.sh — --fork flag: continue a session with full history
 
-_cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/jb/sessions"
+_cache_dir="$JB_SESSIONS_DIR"
 
 # --- Slice 1: --fork loads source history and sets strong parent ---
 
 # Create a source session first (non-agentic prompt so the model doesn't spawn children)
-_src_out=$(echo "reply with exactly the word PONG" | "$JB" 2>/dev/null)
+_src_out=$(prompt_pong | "$JB" 2>/dev/null)
 _rc=$?
 if [ "$_rc" -ne 0 ]; then
     fail "source session runs" "exit code $_rc"
@@ -14,7 +14,7 @@ else
 fi
 
 # Find the newest session (the source)
-_src_dir=$(ls -td "$_cache_dir"/*/ 2>/dev/null | head -1)
+_src_dir=$(newest_session)
 if [ -z "$_src_dir" ] || [ ! -f "$_src_dir/metadata.json" ]; then
     fail "fork: source session dir found" "no session dir"
 else

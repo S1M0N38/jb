@@ -5,12 +5,12 @@
 _out=$(echo "say hello" | "$JB" 2>/dev/null) || true
 
 # Find latest session
-_cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/jb/sessions"
-_latest=$(ls -td "$_cache_dir"/*/ 2>/dev/null | head -1)
+_cache_dir="$JB_SESSIONS_DIR"
+_latest=$(newest_session)
 
 if [ -z "$_latest" ]; then
     fail "final answer in state.jsonl" "no session dir found"
-    exit 0
+    return 0   # sourced by run.sh — return, never exit (exit would kill the runner)
 fi
 
 _state="$_latest/state.jsonl"
