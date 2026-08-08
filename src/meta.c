@@ -600,6 +600,57 @@ int cmd_log(const char *graph_arg)
     return 0;
 }
 
+/* cmd_wait — poll metadata.json every 250 ms until status ∈ {completed,
+   error}; stdout silent, one waiting line on stderr; refuses the current
+   session (self-deadlock). 0 completed · 1 error/not found · 2 usage (§7) */
+int cmd_wait(const char *id_arg)
+{
+    char repo_root[4096];
+    if (require_repo(repo_root, sizeof(repo_root)) != 0) return 1;
+
+    if (!id_arg) {
+        fprintf(stderr, "jb: wait requires a session ID (see 'jb help wait')\n");
+        return 2;
+    }
+    char uuid[JB_UUID_LEN];
+    if (jb_resolve_id_arg(repo_root, id_arg, uuid, sizeof(uuid)) != 0) return 1;
+
+    /* refuse the current session: waiting on @ is a self-deadlock */
+    const char *env = getenv("JB_SESSION");
+    if (env && env[0]) {
+        char cur[JB_UUID_LEN];
+        char err[512];
+        if (session_resolve(repo_root, env, cur, sizeof(cur), err, sizeof(err)) == 0
+            && strcmp(cur, uuid) == 0) {
+            fprintf(stderr, "jb: cannot wait on the current session\n");
+            return 1;
+        }
+    }
+
+    char meta[4096];
+    snprintf(meta, sizeof(meta), "%s/.jb/sessions/%s/metadata.json",
+             repo_root, uuid);
+    fprintf(stderr, "jb: waiting for %.8s…\n", uuid);
+
+    for (;;) {
+        char *json = read_file(meta);
+        if (!json) return 1;   /* vanished mid-wait → not found */
+        cJSON *root = cJSON_Parse(json);
+        free(json);
+        if (!root) { cJSON_Delete(root); return 1; }
+        cJSON *v = cJSON_GetObjectItemCaseSensitive(root, "status");
+        const char *status = cJSON_IsString(v) && v->valuestring
+                                 ? v->valuestring : "";
+        int rc = 0;
+        if (strcmp(status, "completed") == 0) rc = 0;
+        else if (strcmp(status, "error") == 0) rc = 1;
+        else rc = -1;   /* keep polling (working / committed / unknown) */
+        cJSON_Delete(root);
+        if (rc >= 0) return rc;
+        usleep(250000);
+    }
+}
+
 /* cmd_ps — children of @: pending lines id<TAB>status<TAB>age<TAB>subject
    (newest first), then committed: N when N > 0 (§7) */
 int cmd_ps(void)

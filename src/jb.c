@@ -665,6 +665,9 @@ int main(int argc, char **argv)
     if (strcmp(verb, "log") == 0) {
         return cmd_log(verb_arg);
     }
+    if (strcmp(verb, "wait") == 0) {
+        return cmd_wait(verb_arg);
+    }
 
     fprintf(stderr, "jb: unknown command '%s' (see 'jb help')\n", verb);
     return 2;

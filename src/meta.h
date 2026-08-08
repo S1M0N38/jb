@@ -41,4 +41,8 @@ int cmd_status(void);
    0 · 1 not a repo · 2 usage */
 int cmd_log(const char *graph_arg);
 
+/* jb wait ID — poll metadata until terminal; refuses the current session.
+   0 completed · 1 error/not found · 2 usage */
+int cmd_wait(const char *id_arg);
+
 #endif
