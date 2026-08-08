@@ -261,6 +261,33 @@ static int find_repo(const char *start, char *out, size_t outlen)
 static int api_chat_with_retry(const jb_config *cfg, const char *sys_prompt,
                                cJSON *messages, cJSON *tools, api_response *resp);
 
+/* Resolve a session ID argument for --fork/--seed: "@" reads $JB_SESSION
+   (unset → "jb: JB_SESSION not set"). Prints the reference error and
+   returns -1 on failure, else 0 with the full uuid in out. */
+static int resolve_id_arg(const char *repo_root, const char *arg,
+                          char *out, size_t outlen)
+{
+    char err[512];
+    const char *id = arg;
+    int from_env = 0;
+    if (strcmp(arg, "@") == 0) {
+        const char *env = getenv("JB_SESSION");
+        if (!env || !env[0]) {
+            fprintf(stderr, "jb: JB_SESSION not set\n");
+            return -1;
+        }
+        id = env;
+        from_env = 1;
+    }
+    int rc = session_resolve(repo_root, id, out, outlen, err, sizeof(err));
+    if (rc == 0) return 0;
+    if (from_env && rc == 1)
+        fprintf(stderr, "jb: JB_SESSION %s not found\n", id);
+    else
+        fprintf(stderr, "jb: %s\n", err);
+    return -1;
+}
+
 static int cmd_run(const char *config_path, const char *argv0, int run_argc, char **run_argv);
 static int api_chat_with_retry(const jb_config *cfg, const char *sys_prompt,
                                cJSON *messages, cJSON *tools, api_response *resp)
@@ -504,7 +531,9 @@ int main(int argc, char **argv)
 
 static int cmd_run(const char *config_path, const char *argv0, int run_argc, char **run_argv)
 {
-    /* run verb flags: --config PATH (may also appear as a global flag) */
+    /* run verb flags: --fork ID, --seed ID, --config PATH */
+    const char *fork_arg = NULL;
+    const char *seed_arg = NULL;
     for (int j = 0; j < run_argc; j++) {
         if (strcmp(run_argv[j], "--config") == 0) {
             if (config_path) {
@@ -516,6 +545,18 @@ static int cmd_run(const char *config_path, const char *argv0, int run_argc, cha
                 return 2;
             }
             config_path = run_argv[++j];
+        } else if (strcmp(run_argv[j], "--fork") == 0) {
+            if (j + 1 >= run_argc) {
+                fprintf(stderr, "jb: option '--fork' requires a value\n");
+                return 2;
+            }
+            fork_arg = run_argv[++j];
+        } else if (strcmp(run_argv[j], "--seed") == 0) {
+            if (j + 1 >= run_argc) {
+                fprintf(stderr, "jb: option '--seed' requires a value\n");
+                return 2;
+            }
+            seed_arg = run_argv[++j];
         } else {
             fprintf(stderr, "jb: unknown option '%s' for 'run'\n", run_argv[j]);
             return 2;
@@ -529,6 +570,58 @@ static int cmd_run(const char *config_path, const char *argv0, int run_argc, cha
     if (find_repo(cwd, repo_root, sizeof(repo_root)) != 0) {
         fprintf(stderr, "jb: fatal: not a jb repository (run 'jb init')\n");
         return 1;
+    }
+
+    /* ---- Lineage (phase 4): --fork = conversation parent, --seed =
+       provenance; otherwise the $JB_SESSION env is the creator. All IDs
+       resolve against .jb sessions — full uuid, unique 4+ hex prefix, or
+       @ for the env session. ---- */
+    char parent_uuid[JB_UUID_LEN] = "";
+    char seed_uuid[JB_UUID_LEN] = "";
+
+    if (fork_arg) {
+        if (resolve_id_arg(repo_root, fork_arg, parent_uuid,
+                           sizeof(parent_uuid)) != 0)
+            return 1;
+    }
+    if (seed_arg) {
+        if (resolve_id_arg(repo_root, seed_arg, seed_uuid,
+                           sizeof(seed_uuid)) != 0)
+            return 1;
+    } else {
+        /* No explicit --seed: a stale $JB_SESSION (parent deleted) must
+           not silently poison lineage — refuse the run. */
+        const char *jb_env = getenv("JB_SESSION");
+        if (jb_env && jb_env[0]) {
+            char resolved[JB_UUID_LEN];
+            char err[512];
+            int rc = session_resolve(repo_root, jb_env, resolved,
+                                     sizeof(resolved), err, sizeof(err));
+            if (rc == 1) {
+                fprintf(stderr, "jb: JB_SESSION %s not found\n", jb_env);
+                return 1;
+            }
+            if (rc == 2) {
+                fprintf(stderr, "jb: %s\n", err);
+                return 1;
+            }
+            snprintf(seed_uuid, sizeof(seed_uuid), "%s", resolved);
+        }
+    }
+
+    /* Fork: load the parent's conversation BEFORE the session exists — a
+       broken parent aborts with no session dir left behind. The loaded
+       history is replayed into the new session.jsonl after the header. */
+    cJSON *messages = cJSON_CreateArray();
+    if (parent_uuid[0]) {
+        char parent_path[4096];
+        snprintf(parent_path, sizeof(parent_path),
+            "%s/.jb/sessions/%s/session.jsonl", repo_root, parent_uuid);
+        if (session_load_pi(parent_path, messages) < 0) {
+            fprintf(stderr, "jb: --fork: cannot load session '%s'\n", parent_uuid);
+            cJSON_Delete(messages);
+            return 1;
+        }
     }
 
     jb_config cfg;
@@ -547,10 +640,16 @@ static int cmd_run(const char *config_path, const char *argv0, int run_argc, cha
     }
     g_session_active = 1;
 
-    /* Author: the spawning session ($JB_SESSION) or "" for a human run */
-    {
-        const char *jb_env = getenv("JB_SESSION");
-        if (jb_env && jb_env[0]) session_set_author(&g_session, jb_env);
+    /* Author: --seed provenance, else the spawning session ($JB_SESSION),
+       else "" for a human run — resolved above. */
+    if (seed_uuid[0]) session_set_author(&g_session, seed_uuid);
+
+    /* Parent (--fork): recorded in metadata + the header's parentSession */
+    if (parent_uuid[0]) {
+        char parent_path[4096];
+        snprintf(parent_path, sizeof(parent_path),
+            "%s/.jb/sessions/%s/session.jsonl", repo_root, parent_uuid);
+        session_set_parent(&g_session, parent_uuid, parent_path);
     }
 
     /* Export our own identity so children inherit provenance */
@@ -562,14 +661,19 @@ static int cmd_run(const char *config_path, const char *argv0, int run_argc, cha
 
     jb_session *sess = &g_session;
 
-    /* Stderr banner */
-    fprintf(stderr, "jb: session %.8s started\n", sess->uuid);
+    /* Stderr banner (reference §7: "(from …)" names the --fork parent) */
+    if (parent_uuid[0])
+        fprintf(stderr, "jb: session %.8s started (from %.8s)\n",
+                sess->uuid, parent_uuid);
+    else
+        fprintf(stderr, "jb: session %.8s started\n", sess->uuid);
 
     /* Read prompt from stdin */
     char *user_prompt = read_stdin();
     if (!user_prompt || !user_prompt[0]) {
         fprintf(stderr, "jb: no prompt on stdin\n");
         session_close(sess);
+        cJSON_Delete(messages);
         free(user_prompt);
         return 2;
     }
@@ -596,10 +700,17 @@ static int cmd_run(const char *config_path, const char *argv0, int run_argc, cha
     /* session.jsonl + events.jsonl: v3 header, then the user entry */
     session_write_header(sess, cwd);
 
-    /* Build the initial messages array — pi format (§3.3). The wire body is
-       derived in build_request_body(); the system prompt is prepended at
-       request time and never persisted. */
-    cJSON *messages = cJSON_CreateArray();
+    /* Replay the parent's history into our own session.jsonl — new entry
+       ids, re-chained; the header's parentSession is the lineage link. */
+    if (parent_uuid[0]) {
+        for (cJSON *m = messages->child; m; m = m->next)
+            session_append_message(sess, m);
+    }
+
+    /* Build the initial messages array — pi format (§3.3). For a fork it
+       already holds the parent's trimmed history; the wire body is derived
+       in build_request_body(); the system prompt is prepended at request
+       time and never persisted. */
 
     /* User message: persisted via session_append_message (entry base: id,
        parentId, timestamps), then owned by the messages array. */

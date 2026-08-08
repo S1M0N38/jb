@@ -17,7 +17,9 @@ typedef struct {
     char subject[256];          /* prompt first line */
     char started_at[40];        /* ISO-ms timestamp */
     char working_dir[4096];     /* cwd at session start */
-    char author[JB_UUID_LEN];   /* creator: $JB_SESSION or "" (human) */
+    char author[JB_UUID_LEN];   /* creator: --seed / $JB_SESSION or "" (human) */
+    char parent[JB_UUID_LEN];   /* parent session uuid — set only by --fork */
+    char parent_path[4096];     /* parent session.jsonl path (header parentSession) */
     jb_config cfg_snapshot;     /* config snapshot for metadata close */
     char last_entry_id[16];     /* id of the last appended entry (parentId chain) */
     char **used_ids;            /* collision check for generated entry ids */
@@ -65,9 +67,32 @@ int session_write_metadata_init(jb_session *sess, const char *prompt,
 int session_write_metadata_close(jb_session *sess, const char *status,
                                  long tokens_used, int turns, int exit_code);
 
-/* Set the author (creator session) — from $JB_SESSION env when spawned.
-   Call before session_write_metadata_init. */
+/* Set the author (creator session) — from --seed or $JB_SESSION env when
+   spawned. Call before session_write_metadata_init. */
 void session_set_author(jb_session *sess, const char *author);
+
+/* Set the parent session (--fork): the parent uuid (metadata "parent") and
+   the absolute path of its session.jsonl (header "parentSession").
+   Call before session_write_header / session_write_metadata_init. */
+void session_set_parent(jb_session *sess, const char *uuid, const char *session_path);
+
+/* Resolve a session ID against .jb/sessions/<uuid>/ directory names:
+   a full uuid or a unique 4+ hex prefix. On success writes the full uuid
+   to out and returns 0. Returns 1 (not found — err holds "no session …")
+   or 2 (ambiguous — err holds "ambiguous id … (candidates)"). */
+int session_resolve(const char *repo_root, const char *id,
+                    char *out, size_t outlen, char *err, size_t errlen);
+
+/* Load a pi-format session.jsonl (v3) into a messages array of pi-format
+   message objects (deep copies of each entry's message, §4.1). Validates
+   the header; tolerates unparseable lines. Trims the dangling tail: drops
+   everything after the last complete assistant message (stopReason "stop",
+   or "toolUse" with all its toolResults present) — an interrupted source
+   session never leaks unpaired tool calls/results into the fork. With no
+   complete assistant message the fork starts with an empty history.
+   Returns the number of messages kept, or -1 when the file is missing or
+   the header is invalid. */
+int session_load_pi(const char *session_path, cJSON *messages);
 
 /* Close session files. */
 void session_close(jb_session *sess);

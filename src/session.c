@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <dirent.h>
 #include <errno.h>
 #include <time.h>
 
@@ -170,6 +171,211 @@ void session_set_author(jb_session *sess, const char *author)
     }
 }
 
+void session_set_parent(jb_session *sess, const char *uuid, const char *session_path)
+{
+    if (uuid && uuid[0]) {
+        strncpy(sess->parent, uuid, JB_UUID_LEN - 1);
+        sess->parent[JB_UUID_LEN - 1] = '\0';
+    }
+    if (session_path && session_path[0]) {
+        strncpy(sess->parent_path, session_path, sizeof(sess->parent_path) - 1);
+        sess->parent_path[sizeof(sess->parent_path) - 1] = '\0';
+    }
+}
+
+/* ---- ID resolution (reference §7: full uuid | unique 4+ hex prefix) ---- */
+
+int session_resolve(const char *repo_root, const char *id,
+                    char *out, size_t outlen, char *err, size_t errlen)
+{
+    char sessions_dir[4096];
+    snprintf(sessions_dir, sizeof(sessions_dir), "%s/.jb/sessions", repo_root);
+
+    /* Candidate session dir names. Capped — more matches is still
+       ambiguous; the message just lists the first few. */
+    char *matches[12];
+    int n = 0;
+    size_t idlen = strlen(id);
+
+    DIR *d = opendir(sessions_dir);
+    if (d) {
+        struct dirent *de;
+        while ((de = readdir(d)) != NULL && n < 12) {
+            if (de->d_name[0] == '.') continue;
+            /* Only directories count as sessions */
+            char full[4224];
+            snprintf(full, sizeof(full), "%s/%s", sessions_dir, de->d_name);
+            struct stat st;
+            if (stat(full, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+            if (strcmp(de->d_name, id) == 0) {
+                /* exact full-uuid match wins outright */
+                snprintf(out, outlen, "%s", de->d_name);
+                closedir(d);
+                return 0;
+            }
+            if (idlen >= 4 && strncmp(de->d_name, id, idlen) == 0)
+                matches[n++] = strdup(de->d_name);
+        }
+        closedir(d);
+    }
+
+    if (n == 0) {
+        snprintf(err, errlen, "no session '%s'", id);
+        return 1;
+    }
+    if (n > 1) {
+        char list[256];
+        size_t used = 0;
+        list[0] = '\0';
+        for (int i = 0; i < n && used < sizeof(list) - 8; i++) {
+            int w = snprintf(list + used, sizeof(list) - used,
+                             "%s%.8s…", i ? ", " : "", matches[i]);
+            if (w < 0) break;
+            used += (size_t)w;
+        }
+        snprintf(err, errlen, "ambiguous id '%s' (%s)", id, list);
+        for (int i = 0; i < n; i++) free(matches[i]);
+        return 2;
+    }
+    snprintf(out, outlen, "%s", matches[0]);
+    free(matches[0]);
+    return 0;
+}
+
+/* ---- Reader (§4.1): session.jsonl → in-memory pi messages, trimmed ---- */
+
+/* Parse one entry line; returns a deep copy of its message object, or NULL
+   when the line is not a well-formed message entry. */
+static cJSON *pi_entry_message(const char *line)
+{
+    cJSON *obj = cJSON_Parse(line);
+    if (!obj) return NULL;
+    cJSON *type = cJSON_GetObjectItemCaseSensitive(obj, "type");
+    if (!type || !cJSON_IsString(type) || strcmp(type->valuestring, "message") != 0) {
+        cJSON_Delete(obj);
+        return NULL;
+    }
+    cJSON *msg = cJSON_GetObjectItemCaseSensitive(obj, "message");
+    cJSON *role = msg ? cJSON_GetObjectItemCaseSensitive(msg, "role") : NULL;
+    if (!msg || !cJSON_IsObject(msg) || !role || !cJSON_IsString(role)) {
+        cJSON_Delete(obj);
+        return NULL;
+    }
+    cJSON *dup = cJSON_Duplicate(msg, 1);
+    cJSON_Delete(obj);
+    return dup;
+}
+
+int session_load_pi(const char *session_path, cJSON *messages)
+{
+    FILE *f = fopen(session_path, "r");
+    if (!f) return -1;
+
+    char line[65536];
+    int lineno = 0;
+    int header_ok = 0;
+    cJSON *all = cJSON_CreateArray();
+
+    while (fgets(line, sizeof(line), f)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        if (!line[0]) continue;
+        lineno++;
+        if (lineno == 1) {
+            /* Validate: first line is the v3 session header */
+            cJSON *obj = cJSON_Parse(line);
+            if (obj) {
+                cJSON *type = cJSON_GetObjectItemCaseSensitive(obj, "type");
+                cJSON *ver = cJSON_GetObjectItemCaseSensitive(obj, "version");
+                if (type && cJSON_IsString(type) &&
+                    strcmp(type->valuestring, "session") == 0 &&
+                    ver && cJSON_IsNumber(ver) && ver->valueint == 3)
+                    header_ok = 1;
+                cJSON_Delete(obj);
+            }
+            if (!header_ok) {
+                cJSON_Delete(all);
+                fclose(f);
+                return -1;
+            }
+            continue;
+        }
+        cJSON *m = pi_entry_message(line);
+        if (m) cJSON_AddItemToArray(all, m);
+    }
+    fclose(f);
+
+    /* A pi session must have its v3 header — an empty file is invalid, and
+       so is one whose first line is not the header (§4.1 step 2). */
+    if (!header_ok) {
+        cJSON_Delete(all);
+        return -1;
+    }
+
+    /* Trim the dangling tail: keep through the last complete assistant
+       message — stopReason "stop", or "toolUse" with every toolCall id
+       matched by a following toolResult. Everything after it is dropped;
+       with no complete assistant message nothing is kept (§4.1 step 4). */
+    int n = cJSON_GetArraySize(all);
+    int keep = 0;
+    for (int i = 0; i < n; i++) {
+        cJSON *m = cJSON_GetArrayItem(all, i);
+        cJSON *role = cJSON_GetObjectItemCaseSensitive(m, "role");
+        if (!role || !cJSON_IsString(role) || strcmp(role->valuestring, "assistant") != 0)
+            continue;
+        cJSON *stop = cJSON_GetObjectItemCaseSensitive(m, "stopReason");
+        if (!stop || !cJSON_IsString(stop)) continue;
+        if (strcmp(stop->valuestring, "stop") == 0) {
+            keep = i + 1;
+        } else if (strcmp(stop->valuestring, "toolUse") == 0) {
+            /* Complete iff it carries toolCall blocks and every id has a
+               toolResult after it — a toolUse with no calls is malformed
+               and never counts as a completed turn */
+            int complete = 1;
+            int n_calls = 0;
+            int last_res = i;
+            cJSON *content = cJSON_GetObjectItemCaseSensitive(m, "content");
+            if (content && cJSON_IsArray(content)) {
+                int nblocks = cJSON_GetArraySize(content);
+                for (int b = 0; b < nblocks; b++) {
+                    cJSON *blk = cJSON_GetArrayItem(content, b);
+                    cJSON *bt = cJSON_GetObjectItemCaseSensitive(blk, "type");
+                    if (!bt || !cJSON_IsString(bt) || strcmp(bt->valuestring, "toolCall") != 0)
+                        continue;
+                    cJSON *bid = cJSON_GetObjectItemCaseSensitive(blk, "id");
+                    if (!bid || !cJSON_IsString(bid)) { complete = 0; break; }
+                    n_calls++;
+                    int found = 0;
+                    for (int j = i + 1; j < n; j++) {
+                        cJSON *jm = cJSON_GetArrayItem(all, j);
+                        cJSON *jr = cJSON_GetObjectItemCaseSensitive(jm, "role");
+                        if (!jr || !cJSON_IsString(jr) || strcmp(jr->valuestring, "toolResult") != 0)
+                            continue;
+                        cJSON *jt = cJSON_GetObjectItemCaseSensitive(jm, "toolCallId");
+                        if (jt && cJSON_IsString(jt) &&
+                            strcmp(jt->valuestring, bid->valuestring) == 0) {
+                            found = 1;
+                            if (j > last_res) last_res = j;
+                        }
+                    }
+                    if (!found) { complete = 0; break; }
+                }
+            }
+            if (complete && n_calls > 0) keep = last_res + 1;
+        }
+    }
+
+    /* Move the kept prefix into the caller's array; drop the tail */
+    for (int i = 0; i < n; i++) {
+        cJSON *m = cJSON_DetachItemFromArray(all, 0);
+        if (i < keep)
+            cJSON_AddItemToArray(messages, m);
+        else
+            cJSON_Delete(m);
+    }
+    cJSON_Delete(all);
+    return keep;
+}
+
 int session_write_header(jb_session *sess, const char *cwd)
 {
     cJSON *h = cJSON_CreateObject();
@@ -183,6 +389,9 @@ int session_write_header(jb_session *sess, const char *cwd)
     cJSON_AddStringToObject(h, "id", sess->uuid);
     cJSON_AddStringToObject(h, "timestamp", ts);
     cJSON_AddStringToObject(h, "cwd", cwd);
+    /* parentSession: present only when --fork set the parent (§3.1) */
+    if (sess->parent_path[0])
+        cJSON_AddStringToObject(h, "parentSession", sess->parent_path);
 
     char *s = cJSON_PrintUnformatted(h);
     cJSON_Delete(h);
@@ -267,6 +476,9 @@ static cJSON *metadata_base(const jb_session *sess)
     cJSON_AddStringToObject(m, "subject", sess->subject);
     cJSON_AddStringToObject(m, "body", "");
     cJSON_AddStringToObject(m, "author", sess->author);
+    /* parent: the context link — set only by --fork (§6) */
+    if (sess->parent[0])
+        cJSON_AddStringToObject(m, "parent", sess->parent);
     cJSON_AddStringToObject(m, "started_at", sess->started_at);
     cJSON_AddStringToObject(m, "working_dir", sess->working_dir);
     add_config_snapshot(m, &sess->cfg_snapshot);
