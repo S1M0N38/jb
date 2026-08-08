@@ -152,6 +152,27 @@ static int cmd_init(void)
     return 0;
 }
 
+/* find_repo — walk up from start looking for .jb/. Returns 0 with the repo
+   root in out, or -1 when no repo encloses start. */
+static int find_repo(const char *start, char *out, size_t outlen)
+{
+    char dir[4096];
+    strncpy(dir, start, sizeof(dir) - 1);
+    dir[sizeof(dir) - 1] = '\0';
+
+    for (;;) {
+        char jbdir[4096];
+        snprintf(jbdir, sizeof(jbdir), "%s/.jb", dir);
+        if (path_is_dir(jbdir)) {
+            snprintf(out, outlen, "%s", dir);
+            return 0;
+        }
+        char *slash = strrchr(dir, '/');
+        if (!slash || slash == dir) return -1;  /* reached the root */
+        *slash = '\0';
+    }
+}
+
 /* Retry wrapper for api_chat — retries on transient errors */
 static int api_chat_with_retry(const jb_config *cfg, cJSON *messages, cJSON *tools,
                                api_response *resp, jb_session *sess);
@@ -270,6 +291,15 @@ int main(int argc, char **argv)
 
 static int cmd_run(const char *config_path, const char *argv0)
 {
+    /* Resolve the repository: walk up from cwd (fatal outside any repo) */
+    char cwd_buf[4096];
+    const char *cwd = getcwd(cwd_buf, sizeof(cwd_buf)) ? cwd_buf : ".";
+    char repo_root[4096];
+    if (find_repo(cwd, repo_root, sizeof(repo_root)) != 0) {
+        fprintf(stderr, "jb: fatal: not a jb repository (run 'jb init')\n");
+        return 1;
+    }
+
     jb_config cfg;
 
     /* Load config — failure is an error (exit 1) */
@@ -303,10 +333,6 @@ static int cmd_run(const char *config_path, const char *argv0)
         free(user_prompt);
         return 2;
     }
-
-    /* Get working directory */
-    char cwd_buf[4096];
-    const char *cwd = getcwd(cwd_buf, sizeof(cwd_buf)) ? cwd_buf : ".";
 
     /* Resolve jb binary path for the jb tool */
     char jb_abs[4096];
