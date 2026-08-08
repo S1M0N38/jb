@@ -71,3 +71,52 @@ session_dir() {
 prompt_pong() {
     echo "reply with exactly the word PONG"
 }
+
+# iso_ms <epoch-seconds> — ISO-8601 UTC with milliseconds, e.g.
+# 2026-08-06T00:33:50.000Z. Portable across BSD (date -r) and GNU (date -d).
+iso_ms() {
+    if date -u -r "$1" +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null; then
+        :
+    else
+        date -u -d "@$1" +%Y-%m-%dT%H:%M:%S.000Z
+    fi
+}
+
+# fixture_session <uuid> <status> [subject] [author] [parent] — hand-built
+# session dir + metadata.json for the metadata verbs (phase 6: fixture
+# repos, no API calls). Subject defaults to the uuid; started_at is exactly
+# 2 minutes ago, ended_at now (unless status is working — then no ended_at).
+# The fixture mirrors what session.c writes (§6 of the reference).
+fixture_session() {
+    _uuid="$1"; _status="$2"
+    _subject="${3:-fixture $1}"
+    _author="${4:-}"
+    _parent="${5:-}"
+    _dir="$JB_SESSIONS_DIR/$_uuid"
+    mkdir -p "$_dir"
+    printf '{"type":"session","version":3,"id":"%s"}\n' "$_uuid" > "$_dir/session.jsonl"
+    : > "$_dir/events.jsonl"
+    _now=$(date +%s)
+    _start=$(iso_ms $((_now - 120)))
+    _end=$(iso_ms "$_now")
+    {
+        printf '{\n'
+        printf '  "uuid": "%s",\n' "$_uuid"
+        printf '  "subject": "%s",\n' "$_subject"
+        printf '  "body": "",\n'
+        printf '  "author": "%s",\n' "$_author"
+        if [ -n "$_parent" ]; then
+            printf '  "parent": "%s",\n' "$_parent"
+        fi
+        printf '  "status": "%s",\n' "$_status"
+        printf '  "started_at": "%s",\n' "$_start"
+        if [ "$_status" != "working" ]; then
+            printf '  "ended_at": "%s",\n' "$_end"
+        fi
+        printf '  "working_dir": "%s",\n' "$SCRATCH"
+        printf '  "config": {"api_url":"https://api.openai.com/v1","model":"gpt-4.1","max_tokens":500000,"max_output_lines":2000,"max_output_bytes":51200},\n'
+        printf '  "turns": 1, "tokens_used": 10, "exit_code": 0,\n'
+        printf '  "last_activity": "%s"\n' "$_end"
+        printf '}\n'
+    } > "$_dir/metadata.json"
+}

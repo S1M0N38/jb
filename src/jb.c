@@ -9,6 +9,7 @@
 #include "config.h"
 #include "session.h"
 #include "api.h"
+#include "meta.h"
 #include "tools.h"
 #include "prompt.h"
 #include "version.h"
@@ -197,17 +198,8 @@ static void cmd_help(const char *verb)
     printf("exit codes: 0 success · 1 error/not found · 2 usage\n");
 }
 
-static int path_is_dir(const char *path)
-{
-    struct stat st;
-    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
-}
-
-static int path_is_file(const char *path)
-{
-    struct stat st;
-    return stat(path, &st) == 0 && S_ISREG(st.st_mode);
-}
+/* find_repo / resolve_id_arg / path_is_dir / path_is_file moved to meta.c
+   (phase 6: shared by the metadata verbs) — see meta.h */
 
 /* mkdir -p for a single path (all intermediate components) */
 static int mkdirs(const char *path)
@@ -263,58 +255,14 @@ static int cmd_init(void)
     return 0;
 }
 
-/* find_repo — walk up from start looking for .jb/. Returns 0 with the repo
-   root in out, or -1 when no repo encloses start. */
-static int find_repo(const char *start, char *out, size_t outlen)
-{
-    char dir[4096];
-    strncpy(dir, start, sizeof(dir) - 1);
-    dir[sizeof(dir) - 1] = '\0';
-
-    for (;;) {
-        char jbdir[4096];
-        snprintf(jbdir, sizeof(jbdir), "%s/.jb", dir);
-        if (path_is_dir(jbdir)) {
-            snprintf(out, outlen, "%s", dir);
-            return 0;
-        }
-        char *slash = strrchr(dir, '/');
-        if (!slash || slash == dir) return -1;  /* reached the root */
-        *slash = '\0';
-    }
-}
+/* find_repo — walk up from start looking for .jb/ (moved to meta.c) */
 
 /* Retry wrapper for api_chat — retries on transient errors */
 static int api_chat_with_retry(const jb_config *cfg, const char *sys_prompt,
                                cJSON *messages, cJSON *tools, api_response *resp,
                                sse_delta_cb on_delta, void *delta_userdata);
 
-/* Resolve a session ID argument for --fork/--seed: "@" reads $JB_SESSION
-   (unset → "jb: JB_SESSION not set"). Prints the reference error and
-   returns -1 on failure, else 0 with the full uuid in out. */
-static int resolve_id_arg(const char *repo_root, const char *arg,
-                          char *out, size_t outlen)
-{
-    char err[512];
-    const char *id = arg;
-    int from_env = 0;
-    if (strcmp(arg, "@") == 0) {
-        const char *env = getenv("JB_SESSION");
-        if (!env || !env[0]) {
-            fprintf(stderr, "jb: JB_SESSION not set\n");
-            return -1;
-        }
-        id = env;
-        from_env = 1;
-    }
-    int rc = session_resolve(repo_root, id, out, outlen, err, sizeof(err));
-    if (rc == 0) return 0;
-    if (from_env && rc == 1)
-        fprintf(stderr, "jb: JB_SESSION %s not found\n", id);
-    else
-        fprintf(stderr, "jb: %s\n", err);
-    return -1;
-}
+/* Resolve a session ID argument for --fork/--seed (moved to meta.c) */
 
 static int cmd_run(const char *config_path, const char *argv0, int run_argc, char **run_argv);
 static int api_chat_with_retry(const jb_config *cfg, const char *sys_prompt,
@@ -702,6 +650,9 @@ int main(int argc, char **argv)
     if (strcmp(verb, "run") == 0) {
         return cmd_run(config_path, argv[0], argc - i - 1, argv + i + 1);
     }
+    if (strcmp(verb, "path") == 0) {
+        return cmd_path(verb_arg);
+    }
 
     fprintf(stderr, "jb: unknown command '%s' (see 'jb help')\n", verb);
     return 2;
@@ -745,7 +696,7 @@ static int cmd_run(const char *config_path, const char *argv0, int run_argc, cha
     char cwd_buf[4096];
     const char *cwd = getcwd(cwd_buf, sizeof(cwd_buf)) ? cwd_buf : ".";
     char repo_root[4096];
-    if (find_repo(cwd, repo_root, sizeof(repo_root)) != 0) {
+    if (jb_find_repo(cwd, repo_root, sizeof(repo_root)) != 0) {
         fprintf(stderr, "jb: fatal: not a jb repository (run 'jb init')\n");
         return 1;
     }
@@ -758,12 +709,12 @@ static int cmd_run(const char *config_path, const char *argv0, int run_argc, cha
     char seed_uuid[JB_UUID_LEN] = "";
 
     if (fork_arg) {
-        if (resolve_id_arg(repo_root, fork_arg, parent_uuid,
+        if (jb_resolve_id_arg(repo_root, fork_arg, parent_uuid,
                            sizeof(parent_uuid)) != 0)
             return 1;
     }
     if (seed_arg) {
-        if (resolve_id_arg(repo_root, seed_arg, seed_uuid,
+        if (jb_resolve_id_arg(repo_root, seed_arg, seed_uuid,
                            sizeof(seed_uuid)) != 0)
             return 1;
     } else {
