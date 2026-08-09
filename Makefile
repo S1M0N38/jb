@@ -13,6 +13,7 @@ SRCS    = $(SRCDIR)/jb.c \
           $(SRCDIR)/api.c \
           $(SRCDIR)/tools.c \
           $(SRCDIR)/prompt.c \
+          $(SRCDIR)/export.c \
           $(VENDIR)/cJSON.c
 
 OBJS    = $(SRCS:.c=.o)
@@ -20,6 +21,10 @@ OBJS    = $(SRCS:.c=.o)
 TARGET  = jb
 
 PREFIX ?= /usr/local
+
+# Vendored pi viewer assets (pi 0.84.1, MIT, pinned) -> src/assets.inc
+ASSETS  = $(SRCDIR)/assets.inc
+ASSET_FILES = $(wildcard $(VENDIR)/pi-export/*) $(wildcard $(VENDIR)/pi-export/vendor/*)
 
 .PHONY: all clean test install
 
@@ -31,8 +36,13 @@ $(TARGET): $(OBJS)
 %.o: %.c
 	$(CC) $(CFLAGS) -I$(SRCDIR) -I$(VENDIR) -c -o $@ $<
 
+$(ASSETS): $(ASSET_FILES) $(VENDIR)/pi-export/gen-assets.sh
+	sh $(VENDIR)/pi-export/gen-assets.sh
+
+$(SRCDIR)/export.o: $(ASSETS)
+
 clean:
-	rm -f $(OBJS) $(TARGET)
+	rm -f $(OBJS) $(TARGET) $(ASSETS)
 
 install: $(TARGET)
 	mkdir -p $(PREFIX)/bin

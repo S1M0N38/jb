@@ -11,6 +11,7 @@
 #include "api.h"
 #include "meta.h"
 #include "commit.h"
+#include "export.h"
 #include "tools.h"
 #include "prompt.h"
 #include "version.h"
@@ -679,6 +680,9 @@ int main(int argc, char **argv)
     }
     if (strcmp(verb, "wait") == 0) {
         return cmd_wait(verb_arg);
+    }
+    if (strcmp(verb, "export") == 0) {
+        return cmd_export(argc - i - 1, argv + i + 1);
     }
 
     fprintf(stderr, "jb: unknown command '%s' (see 'jb help')\n", verb);
