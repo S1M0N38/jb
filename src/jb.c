@@ -39,6 +39,7 @@ static cJSON *usage_object(long prompt_tokens, long completion_tokens,
                            long reasoning_tokens, long total_tokens);
 
 /* Events + entry append helpers (defined below) — abort_run needs them. */
+static void emit_message_start(jb_session *sess, const jb_config *cfg);
 static void emit_message_end(jb_session *sess, cJSON *message);
 static void emit_agent_end(jb_session *sess, cJSON *messages);
 static void append_or_warn(jb_session *sess, cJSON *msg);
@@ -125,11 +126,17 @@ static void abort_run(int sig, cJSON *messages, const char *partial,
             append_or_warn(&g_session, msg);
             cJSON_AddItemToArray(messages, msg);
 
-            /* Events stream (§5): close the in-flight message with an
-               aborted message_end, then agent_end with the final messages
-               array — the stream never dangles. */
-            if (g_msg_in_flight)
+            /* Events stream (§5): every aborted entry gets a complete
+               message_start → message_end pair, then agent_end with the
+               final messages array — the stream never dangles and never
+               carries an entry without its own start/end. Mid-stream
+               (g_msg_in_flight) the start was already emitted. */
+            if (g_msg_in_flight) {
                 emit_message_end(&g_session, msg);
+            } else {
+                emit_message_start(&g_session, &g_session.cfg_snapshot);
+                emit_message_end(&g_session, msg);
+            }
             emit_agent_end(&g_session, messages);
         }
         session_write_metadata_close(&g_session, "error", total_tokens,
@@ -268,6 +275,11 @@ static int api_chat_with_retry(const jb_config *cfg, const char *sys_prompt,
     int base_delay = 2;  /* seconds */
 
     for (int attempt = 0; attempt <= max_retries; attempt++) {
+        /* A signal caught during a previous backoff must abort before a
+           fresh blocking read starts (the handler already consumed it —
+           a new curl child would block un-killed). */
+        if (g_signal) return -1;
+
         int rc = api_chat(cfg, sys_prompt, messages, tools, 0, 0, resp,
                           on_delta, delta_userdata);
 
@@ -283,8 +295,11 @@ static int api_chat_with_retry(const jb_config *cfg, const char *sys_prompt,
         }
 
         if (attempt < max_retries) {
+            /* Interruptible backoff: sleep in 1s slices so a signal lands
+               during the wait and is honoured at the next attempt's check. */
             int delay = base_delay << attempt;  /* exponential backoff */
-            sleep((unsigned)delay);
+            for (int s = 0; s < delay && !g_signal; s++)
+                sleep(1);
         }
     }
 
