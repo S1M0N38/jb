@@ -90,3 +90,26 @@ if [ -n "$_latest_session" ] && [ -f "$JB_SESSIONS_DIR/$_latest_session/session.
 else
     skip "jb-view UUID rendering" "no session to view"
 fi
+
+# ---- Phase 9: contrib docs match the repo-scoped layout ----
+
+# contrib/README.md must document the .jb/sessions layout
+case "$(cat "$REPO_ROOT/contrib/README.md")" in
+    *".jb/sessions"*) pass "contrib README documents .jb/sessions layout" ;;
+    *) fail "contrib README documents .jb/sessions layout" "still documents the old cache layout" ;;
+esac
+
+# ...and must not reference the pre-phase-2 XDG cache layout
+case "$(cat "$REPO_ROOT/contrib/README.md")" in
+    *"XDG_CACHE"*) fail "contrib README has no XDG_CACHE_HOME references" "found: $(grep -o 'XDG_CACHE[^ ]*' "$REPO_ROOT/contrib/README.md" | head -1)" ;;
+    *) pass "contrib README has no XDG_CACHE_HOME references" ;;
+esac
+
+# no src file (outside vendor/) may reference the deleted wire-format files
+# or the XDG cache layout — phase 2 cut over hard, nothing may resurrect them
+_src_remnants=$(grep -rIlE "state\.jsonl|log\.jsonl|XDG_CACHE" "$REPO_ROOT/src" --include='*.c' --include='*.h' 2>/dev/null | grep -v vendor || true)
+if [ -z "$_src_remnants" ]; then
+    pass "src has no wire-format/XDG-cache remnants"
+else
+    fail "src has no wire-format/XDG-cache remnants" "found in: $_src_remnants"
+fi

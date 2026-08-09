@@ -1,5 +1,7 @@
 # The `jb` tool and session tree via parent pointers
 
+Status: superseded by [ADR-0006](0006-storage-v2-pi-format.md) — the `--parent` flag is gone. Lineage is now `--fork`/`--seed` plus the `$JB_SESSION` environment variable: a child session records the parent as its `author`, and a fork records `parent` in metadata plus `parentSession` in its session.jsonl header. The session tree remains an observability artifact reconstructed from metadata.
+
 A dedicated `jb` tool for spawning child sessions, replacing the previous pattern of running `echo "task" | jb` via bash. The tool auto-injects the parent's UUID as a `--parent` flag, which the child writes into its `metadata.json`. This produces a session tree — a directed tree of sessions linked by `parent` pointers, observable via `jb-list` and jq with no new tooling.
 
 The alternatives considered were: (1) keep using bash to spawn jb — rejected because the child has no lineage metadata, making it impossible to reconstruct which sessions are related; (2) use an environment variable (`JB_PARENT_UUID`) instead of a CLI flag — rejected because a flag is visible in logs and usable from manual invocations, not just from the tool; (3) store parent in a separate sidecar file instead of `metadata.json` — rejected because it fragments the metadata schema and adds IO for no benefit; (4) validate that the parent UUID refers to an existing session — rejected because the parent may complete or be cleaned up before the child finishes writing metadata, and validation adds complexity for no runtime payoff.

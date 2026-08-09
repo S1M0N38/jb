@@ -1,5 +1,7 @@
 # Session metadata with two-phase write and JSONL listing
 
+Status: superseded by [ADR-0006](0006-storage-v2-pi-format.md) — metadata moved from `~/.cache/jb/sessions/<uuid>/metadata.json` to `.jb/sessions/<uuid>/metadata.json`, status values are `working | completed | committed | error` (no `running`), and the two-phase write is now init + close + `jb commit` (with a per-turn heartbeat). The JSONL listing contract survives via `contrib/jb-list`.
+
 Each session directory gets a `metadata.json` written at two points in jb's lifecycle: init (with `"status":"running"`, title from prompt prefix, start time, cwd, model) and close (overwritten with final status, end time, token/turn counts, exit code). A separate `jb-list` tool emits these as raw JSONL for composition via jq. Title is a ~60-char truncated prompt prefix — no LLM call. No liveness/PID tracking; stale `"running"` sessions are cleaned up manually.
 
 The alternatives considered were: TSV instead of JSONL for `jb-list` output (rejected — we already depend on jq, JSONL handles escaping), incremental status updates during the session (rejected — jb is single-shot, only birth/death matter), LLM-generated titles (rejected — cost/latency for marginal UX gain, can add later), and PID-based liveness checks (rejected — complexity for a single-user tool where manual `rm` suffices). The key trade-off is accepting that crashed sessions permanently show `"running"` in exchange for zero coordination logic between jb and external tools.

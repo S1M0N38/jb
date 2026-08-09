@@ -1,10 +1,24 @@
-jb — a minimal agentic coding loop
-==================================
+jb — a git-inspired agentic coding loop
+========================================
 
-jb reads a prompt from standard input, sends it to a language model
-API, executes tool calls in a loop, and prints the final answer to
-standard output.  Single C binary, zero runtime dependencies except
-curl(1) and POSIX.
+jb is a minimal agentic coding loop: a single C binary that reads a
+prompt from stdin, runs the agent loop against any OpenAI-compatible
+Chat Completions endpoint (cloud or local), and streams the model's
+answer to stdout.  Zero runtime dependencies except curl(1) and POSIX.
+
+The workflow borrows git's shape:
+
+    jb init                          # create .jb/ in the project
+    echo "hello" | jb run            # run a session (real API call)
+    jb commit 9f3c2a1b               # finalize a completed session
+    jb status                        # current session + repo summary
+    jb log --graph                   # the committed forest
+    jb export 9f3c2a1b /tmp/s.html   # pi viewer HTML (self-contained)
+
+Sessions live under `.jb/sessions/<uuid>/` — `session.jsonl` (the
+conversation in pi session format v3), `events.jsonl` (the live stream),
+and `metadata.json` (the jb index).  jb sessions are readable and
+renderable by pi's own tools, and `jb export` produces the pi viewer.
 
 Building:
 
@@ -15,8 +29,9 @@ Installing:
     make install          # PREFIX=/usr/local
     make install PREFIX=~ # install to ~/bin and ~/.local/share/man/man1
 
-Configuration lives in $XDG_CONFIG_HOME/jb/config.json.  You need an
-API key in JB_API_KEY or OPENAI_API_KEY.  See jb(1) for full
-documentation.
+Configuration is git-style: global `~/.config/jb/config.json` merged
+with local `.jb/config.json`, overridable per run with `-c KEY=VALUE`.
+You need an API key in JB_API_KEY or OPENAI_API_KEY.  See jb(1) for the
+full command reference.
 
 License: MIT

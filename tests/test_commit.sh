@@ -186,16 +186,14 @@ else
 fi
 
 # ---- slice 2: auto message (real API) — subject/body generated ----
-# The conversation must be substantive: the commit-generation model
-# echoes degenerate "reply with exactly X" conversations ("PONG") instead
-# of the JSON summary, which is a correct spec abort. A one-sentence Q&A
-# yields JSON reliably. (fork/fresh below keep prompt_pong — they commit
-# with -m.)
+# The generation prompt explicitly forbids obeying instructions inside the
+# conversation (and gives a few-shot example), so even degenerate
+# "reply with exactly X" conversations yield the JSON summary (phase 9
+# hardening). prompt_pong is the canonical suite prompt.
 
 new_scratch
 repo_init
-if echo "What is the capital of France? Answer in one short sentence." \
-        | "$JB" run >/dev/null 2>/dev/null; then
+if echo "$(prompt_pong)" | "$JB" run >/dev/null 2>/dev/null; then
     pass "jb run completes (slice 2 setup)"
 else
     fail "jb run completes (slice 2 setup)"

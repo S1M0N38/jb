@@ -1,7 +1,8 @@
 # Contrib — jb Listing Tools
 
-Companion shell scripts for browsing jb sessions. All scripts read session data
-from `$XDG_CACHE_HOME/jb/sessions/`.
+Companion shell scripts for browsing jb sessions. All scripts read session
+data from `.jb/sessions/<uuid>/` inside the repository (the same layout `jb`
+itself uses — see CONTEXT.md / ADR-0006).
 
 ## Dependencies
 
@@ -9,7 +10,8 @@ from `$XDG_CACHE_HOME/jb/sessions/`.
 
 ## jb-list
 
-List all sessions by reading their `metadata.json` files.
+List all sessions by reading their `metadata.json` files. The repository is
+resolved by walking up from cwd, exactly like `jb` itself.
 
 ### Usage
 
@@ -23,11 +25,11 @@ jb-list | jq '.'
 # Latest completed session
 jb-list | jq -r 'select(.status=="completed") | .uuid' | tail -1
 
-# Find sessions by title
-jb-list | grep -i "README"
+# Sessions matching a subject
+jb-list | jq -r 'select(.subject != null) | .subject' | grep -i "README"
 
-# All running/incomplete sessions
-jb-list | jq 'select(.status=="running")'
+# All working/incomplete sessions
+jb-list | jq 'select(.status=="working")'
 
 # Sessions sorted by start time (most recent first)
 jb-list | jq -s 'sort_by(.started_at) | reverse[]'
@@ -39,15 +41,18 @@ Each line of output is a raw JSON object — the exact contents of each session'
 `metadata.json`. No transformation, sorting, or filtering is applied by the
 script itself. Composition is left to `jq`, `grep`, `sort`, etc.
 
-Example output line:
+Example output line (keys per the metadata schema — reference §6):
 
 ```json
 {
-  "uuid": "fd39d269-a161-4359-a6c6-78258c63d7ba",
-  "status": "completed",
-  "title": "Create a file called /tmp/e2e.txt with content...",
-  "started_at": "2026-05-25T19:01:53Z",
-  "ended_at": "2026-05-25T19:02:04Z",
+  "uuid": "21637177a1b2c3d4e5f60718293a4b5c6",
+  "subject": "re-analyze scheduler failures",
+  "body": "",
+  "author": "32fb4377",
+  "parent": null,
+  "status": "committed",
+  "started_at": "2026-05-25T19:01:53.000Z",
+  "ended_at": "2026-05-25T19:02:04.000Z",
   "working_dir": "/Users/simo/Developer/jb",
   "config": {
     "api_url": "https://opencode.ai/zen/go/v1",
@@ -56,9 +61,10 @@ Example output line:
     "max_output_lines": 2000,
     "max_output_bytes": 51200
   },
-  "tokens_used": 1413,
   "turns": 2,
-  "exit_code": 0
+  "tokens_used": 1413,
+  "exit_code": 0,
+  "last_activity": "2026-05-25T19:02:04.000Z"
 }
 ```
 
@@ -66,10 +72,10 @@ Example output line:
 
 ```sh
 #!/bin/sh
-# Get UUIDs of all completed sessions
-completed_uuids=$(jb-list | jq -r 'select(.status=="completed") | .uuid')
+# Get UUIDs of all committed sessions
+committed_uuids=$(jb-list | jq -r 'select(.status=="committed") | .uuid')
 
-for uuid in $completed_uuids; do
+for uuid in $committed_uuids; do
     # Process each session
     jb-view "$uuid"
 done
@@ -83,18 +89,19 @@ result = subprocess.run(["jb-list"], capture_output=True, text=True)
 sessions = [json.loads(line) for line in result.stdout.strip().split("\n") if line]
 
 for s in sessions:
-    print(f"{s['uuid'][:8]}  {s['status']:12}  {s['title']}")
+    print(f"{s['uuid'][:8]}  {s['status']:12}  {s['subject']}")
 ```
 
 ### Behavior
 
-- Sessions without `metadata.json` are silently skipped (backward compatibility
-  with older sessions that lack metadata).
+- Sessions without `metadata.json` are silently skipped.
 - Exit code 0 always (even when no sessions exist — outputs nothing).
 
 ## jb-view
 
-Render a single session's conversation with ANSI formatting.
+Render a single session's conversation with ANSI formatting. Reads
+`session.jsonl` (pi session format v3) — the authoritative conversation
+record.
 
 ### Usage
 
@@ -102,14 +109,14 @@ Render a single session's conversation with ANSI formatting.
 # View the most recent session
 jb-view
 
-# View a specific session by UUID
+# View a specific session by UUID (or unique 4+ hex prefix)
 jb-view <uuid>
 
 # Pipe to less for paging
 jb-view | less -R
 
 # Combine with jb-list for selection
-jb-list | jq -r 'select(.status=="completed") | .uuid' | tail -1 | xargs jb-view
+jb-list | jq -r 'select(.status=="committed") | .uuid' | tail -1 | xargs jb-view
 ```
 
 ### Header Format
@@ -117,11 +124,11 @@ jb-list | jq -r 'select(.status=="completed") | .uuid' | tail -1 | xargs jb-view
 When `metadata.json` is present, the session header shows:
 
 ```
-session fd39d269  completed  deepseek-v4-flash  2 turns
-> Create a file called /tmp/e2e.txt with content...
+session fd39d269  committed  deepseek-v4-flash  2 turns
+> re-analyze scheduler failures
 ```
 
-When `metadata.json` is missing (old sessions), falls back to:
+When `metadata.json` is missing, falls back to:
 
 ```
 session <full-uuid>  2026-05-25 19:01
@@ -142,7 +149,7 @@ Content is truncated to 6 lines per message to keep output readable.
 ### Programmatic Use
 
 ```sh
-#!/bin.sh
+#!/bin/sh
 # Extract just the final answer from a session
 jb-view "$uuid" | sed -n '/^=/,$ p' | tail -n +2
 
