@@ -141,12 +141,13 @@ case "$_emts" in
     *)       fail "message.timestamp present (epoch ms)" "got: $_emts" ;;
 esac
 
-# ---- The assistant entry (phase 3: pi writer) ----
+# ---- The assistant entry (phase 3: pi writer) — the text block may sit
+# at any index when the provider streamed reasoning (thinking owns 0) ----
 
 _atail=$(tail -1 "$_sj")
 _arole=$(printf '%s' "$_atail" | jq -r '.message.role // empty' 2>/dev/null)
-_ablock=$(printf '%s' "$_atail" | jq -r '.message.content[0].type // empty' 2>/dev/null)
-_atxt=$(printf '%s' "$_atail" | jq -r '.message.content[0].text // empty' 2>/dev/null)
+_ablock=$(printf '%s' "$_atail" | jq -r '[.message.content[]? | select(.type=="text")][0].type // empty' 2>/dev/null)
+_atxt=$(printf '%s' "$_atail" | jq -r '[.message.content[]? | select(.type=="text")][0].text // empty' 2>/dev/null)
 _aapi=$(printf '%s' "$_atail" | jq -r '.message.api // empty' 2>/dev/null)
 _aprov=$(printf '%s' "$_atail" | jq -r '.message.provider // empty' 2>/dev/null)
 _amodel=$(printf '%s' "$_atail" | jq -r '.message.model // empty' 2>/dev/null)
