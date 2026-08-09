@@ -131,10 +131,11 @@ fi
 # jb status: session listed + repo summary (the id shown is the 8-hex
 # short form; without $JB_SESSION in the shell, status shows the
 # awaiting-commit line)
+_uid8=$(printf '%.8s' "$_uuid")
 _sout=$("$JB" status 2>/dev/null)
 case "$_sout" in
-    *"${_uuid:0:8}"*) pass "jb status lists the session" ;;
-    *) fail "jb status lists the session" "short id ${_uuid:0:8} not in status output" ;;
+    *"$_uid8"*) pass "jb status lists the session" ;;
+    *) fail "jb status lists the session" "short id $_uid8 not in status output" ;;
 esac
 case "$_sout" in
     *"repo: 1 sessions"*) pass "jb status shows the repo summary" ;;
@@ -142,16 +143,16 @@ case "$_sout" in
 esac
 
 # commit (auto message — real LLM, JSON-only); session.jsonl unchanged
-_before=$(shasum "$_latest/session.jsonl" | awk '{print $1}')
+# (cmp, not hashes — portable and never vacuously true)
+cp "$_latest/session.jsonl" "$SCRATCH/before-commit.jsonl"
 _cout=$("$JB" commit "$_uuid" 2>&1)
 _rc=$?
-_after=$(shasum "$_latest/session.jsonl" | awk '{print $1}')
 if [ "$_rc" -eq 0 ]; then
     pass "jb commit <uuid> (auto message) exits 0"
 else
     fail "jb commit <uuid> (auto message) exits 0" "got: $_cout"
 fi
-if [ "$_before" = "$_after" ]; then
+if cmp -s "$_latest/session.jsonl" "$SCRATCH/before-commit.jsonl"; then
     pass "commit leaves session.jsonl byte-identical"
 else
     fail "commit leaves session.jsonl byte-identical" "file changed"
@@ -198,13 +199,14 @@ else
 fi
 
 # jb log --graph: both sessions, fork edge (root committed + fork committed)
+_fid8=$(printf '%.8s' "$_fuuid")
 _gout=$("$JB" log --graph 2>/dev/null)
 case "$_gout" in
-    *"${_uuid:0:8}"*) pass "jb log --graph shows the root session" ;;
+    *"$_uid8"*) pass "jb log --graph shows the root session" ;;
     *) fail "jb log --graph shows the root session" "got: $(echo "$_gout" | head -3)" ;;
 esac
 case "$_gout" in
-    *"${_fuuid:0:8}"*) pass "jb log --graph shows the fork session" ;;
+    *"$_fid8"*) pass "jb log --graph shows the fork session" ;;
     *) fail "jb log --graph shows the fork session" "got: $(echo "$_gout" | head -3)" ;;
 esac
 case "$_gout" in
