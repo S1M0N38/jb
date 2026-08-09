@@ -91,13 +91,22 @@ static int parse_message_reply(const char *text, char *subject,
 
     const char *end = NULL;
     cJSON *parsed = cJSON_ParseWithOpts(buf, &end, 1);
-    free(buf);
-    if (!parsed) return -1;
+    /* end points INTO buf — the trailing-content check must run while buf
+       is still alive, before the free */
+    if (!parsed) {
+        free(buf);
+        return -1;
+    }
     if (end) {
         while (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r')
             end++;
-        if (*end) { cJSON_Delete(parsed); return -1; }
+        if (*end) {
+            free(buf);
+            cJSON_Delete(parsed);
+            return -1;
+        }
     }
+    free(buf);
 
     cJSON *s = cJSON_GetObjectItemCaseSensitive(parsed, "subject");
     cJSON *b = cJSON_GetObjectItemCaseSensitive(parsed, "body");
