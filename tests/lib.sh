@@ -36,7 +36,7 @@ new_scratch() {
     if [ -f "$REAL_CFG" ]; then
         cp "$REAL_CFG" "$SCRATCH/.config/jb/config.json"
     else
-        echo "jb tests: no config at $REAL_CFG — API tests will fail with exit 3" >&2
+        echo "jb tests: no config at $REAL_CFG — API tests will fail (exit 1)" >&2
     fi
     export HOME="$SCRATCH"
     export XDG_CONFIG_HOME="$SCRATCH/.config"

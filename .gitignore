@@ -2,6 +2,9 @@
 *.o
 jb
 
+# jb repositories (session storage — never commit conversations)
+.jb/
+
 # Secrets / local env
 .envrc
 
