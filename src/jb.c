@@ -57,6 +57,14 @@ static void handle_signal(int sig)
     if ((p = tools_child_pid()) > 0) kill(p, SIGTERM);
 }
 
+/* Non-zero when a signal has been caught — checked at safe points in the
+   main loop and after child registrations (the registration race: a
+   signal consumed before the fork must still kill the fresh child). */
+int jb_signal_pending(void)
+{
+    return g_signal != 0;
+}
+
 /* Install SIGINT/SIGTERM handlers with no SA_RESTART, so blocking reads
    return EINTR instead of restarting. */
 static void install_signal_handlers(void)
@@ -1078,7 +1086,9 @@ static int cmd_run(const char *config_path, const char *const *overrides,
 
             /* Heartbeat (reference §6): the turn completed — refresh
                last_activity so stuck-child detection works mid-run. */
-            session_write_metadata_heartbeat(sess);
+            if (session_write_metadata_heartbeat(sess) != 0)
+                fprintf(stderr, "jb: warning: failed to write %s\n",
+                        sess->metadata_path);
 
             cJSON_Delete(resp.tool_calls_arr);
             free(resp.text);

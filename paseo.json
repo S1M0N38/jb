@@ -2,6 +2,7 @@
   "worktree": {
     "setup": [
       "cp \"$PASEO_SOURCE_CHECKOUT_PATH/.envrc\" .envrc",
+      "command -v direnv >/dev/null && direnv allow . || true",
       "make"
     ]
   },

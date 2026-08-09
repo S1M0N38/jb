@@ -42,10 +42,12 @@ FILE *subproc_open(const char *cmd, pid_t *pid_out)
 
 int subproc_close(FILE *fp, pid_t pid)
 {
-    if (fclose(fp) != 0) return -1;
+    int rc = fclose(fp);
+    /* Reap regardless of the fclose result — a skipped waitpid leaks a
+       zombie. */
     int status;
     while (waitpid(pid, &status, 0) < 0) {
         if (errno != EINTR) return -1;
     }
-    return status;
+    return rc == 0 ? status : -1;
 }

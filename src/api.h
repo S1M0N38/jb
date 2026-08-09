@@ -66,4 +66,8 @@ int api_chat(const jb_config *cfg, const char *sys_prompt, cJSON *messages,
 void api_set_curl_pid(pid_t pid);
 pid_t api_curl_pid(void);
 
+/* Non-zero when SIGINT/SIGTERM has been caught (defined in jb.c — the
+   handler only sets the flag; callers check it at safe points). */
+int jb_signal_pending(void);
+
 #endif

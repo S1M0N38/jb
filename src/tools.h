@@ -29,4 +29,7 @@ void tools_set_config_path(const char *path);
 void tools_set_child_pid(pid_t pid);
 pid_t tools_child_pid(void);
 
+/* Non-zero when SIGINT/SIGTERM has been caught (defined in jb.c). */
+int jb_signal_pending(void);
+
 #endif

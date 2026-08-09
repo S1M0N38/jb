@@ -521,6 +521,10 @@ int api_chat(const jb_config *cfg, const char *sys_prompt, cJSON *messages,
     FILE *fp = subproc_open(cmd, &curl_pid);
     if (!fp) { remove(tmpfile); return -1; }
     api_set_curl_pid(curl_pid);
+    /* Close the registration race: a signal consumed between the last
+       g_signal check and the fork left this child un-killed — the read
+       would block until the child exits. Kill it now. */
+    if (jb_signal_pending()) kill(curl_pid, SIGTERM);
 
     sse_state st;
     sse_state_init(&st);
