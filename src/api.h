@@ -5,10 +5,12 @@
 #include "config.h"
 #include "cJSON.h"
 #include "session.h"
+#include <sys/types.h>
 
 /* Parsed state from a completed SSE stream */
 typedef struct {
     char *text;             /* accumulated text content (final answer) */
+    char *thinking;         /* accumulated reasoning_content deltas ("" if none) */
     int finish_tool_calls;  /* 1 if finish_reason was "tool_calls" */
     cJSON *tool_calls_arr;  /* array of accumulated tool call objects */
     long total_tokens;      /* from usage field */
@@ -21,6 +23,7 @@ typedef struct {
 
 typedef enum {
     SSE_DELTA_TEXT = 0,          /* text_delta */
+    SSE_DELTA_THINKING,          /* thinking_delta — reasoning_content fragment */
     SSE_DELTA_TOOLCALL_START,    /* toolcall_start — first id/name chunk */
     SSE_DELTA_TOOLCALL_DELTA,    /* toolcall_delta — arguments fragment */
     SSE_DELTA_TOOLCALL_END       /* toolcall_end — at stream end */
@@ -58,8 +61,9 @@ int api_chat(const jb_config *cfg, const char *sys_prompt, cJSON *messages,
              cJSON *tools, long max_tokens, int json_mode,
              api_response *resp, sse_delta_cb on_delta, void *delta_userdata);
 
-/* Copy the text streamed so far by the in-flight api_chat call into out
-   ("" when no stream is active). For the SIGINT abort path. */
-void api_stream_text_snapshot(char *out, size_t outlen);
+/* The curl child's pid while an api_chat stream is in flight (0 when no
+   stream is active). The signal handler kills it to unblock the read. */
+void api_set_curl_pid(pid_t pid);
+pid_t api_curl_pid(void);
 
 #endif

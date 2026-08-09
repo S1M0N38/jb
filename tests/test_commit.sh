@@ -41,7 +41,7 @@ else
     fail "jb commit refuses a working session" "got exit $_rc"
 fi
 case "$_err" in
-    "jb: session aaaaaaaa is working"*) pass "jb commit working refusal message" ;;
+    "jb: cannot commit aaaaaaaa — status is working"*) pass "jb commit working refusal message" ;;
     *) fail "jb commit working refusal message" "got: $_err" ;;
 esac
 

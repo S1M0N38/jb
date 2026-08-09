@@ -52,11 +52,6 @@ int session_append_event(jb_session *sess, const char *json_line);
    Returns 0 on success, -1 on error. */
 int session_append_message(jb_session *sess, cJSON *message);
 
-/* Append a pre-built JSON line to session.jsonl WITHOUT updating the entry
-   chain (used by the signal handler, which cannot run cJSON/malloc).
-   Returns 0 on success. */
-int session_append_raw(jb_session *sess, const char *json_line);
-
 /* Write initial metadata.json (status: working, subject, config snapshot).
    Returns 0 on success, -1 on error. */
 int session_write_metadata_init(jb_session *sess, const char *prompt,
@@ -66,6 +61,10 @@ int session_write_metadata_init(jb_session *sess, const char *prompt,
    Atomic: temp file + rename. Returns 0 on success, -1 on error. */
 int session_write_metadata_close(jb_session *sess, const char *status,
                                  long tokens_used, int turns, int exit_code);
+
+/* Heartbeat: rewrite metadata.json with a fresh last_activity while the
+   session is working. Atomic: temp file + rename. Returns 0 on success. */
+int session_write_metadata_heartbeat(jb_session *sess);
 
 /* Set the author (creator session) — from --seed or $JB_SESSION env when
    spawned. Call before session_write_metadata_init. */

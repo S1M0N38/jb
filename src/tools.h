@@ -3,6 +3,7 @@
 #define JB_TOOLS_H
 
 #include "cJSON.h"
+#include <sys/types.h>
 
 /* Returns a cJSON array of tool definitions for the API request */
 cJSON *tools_get_definitions(void);
@@ -22,5 +23,10 @@ void tools_set_jb_path(const char *path);
 
 /* Set config file path for child jb inheritance */
 void tools_set_config_path(const char *path);
+
+/* The pid of the tool child currently executing (0 when none). The signal
+   handler kills it to unblock the read — async-signal-safe. */
+void tools_set_child_pid(pid_t pid);
+pid_t tools_child_pid(void);
 
 #endif

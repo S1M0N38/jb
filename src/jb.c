@@ -20,14 +20,16 @@
 static jb_session g_session;
 static int g_session_active = 0;
 static char *g_partial_answer = NULL;
+/* The caught signal number (0 = none). The handler ONLY sets this flag
+   and kills the curl/tool child — everything else happens in the main
+   loop at the next checkpoint (async-signal-safety: a handler must not
+   run malloc/stdio/cJSON — the interrupted code may hold the allocator
+   or stream locks). */
+static volatile sig_atomic_t g_signal = 0;
 /* 1 while a message_start has been emitted for the in-flight assistant
-   response and its message_end has not — the SIGINT handler uses it to
+   response and its message_end has not — the abort path uses it to
    close the events stream (message_end aborted + agent_end). */
 static int g_msg_in_flight = 0;
-
-/* JSON-escape a string into out — allocation-free, safe for the signal
-   handler. Truncates when out is nearly full. */
-static void json_escape(const char *in, char *out, size_t outlen);
 
 /* provider = hostname of api_url, reference §3.4: */
 static void provider_from_url(const char *api_url, char *out, size_t outlen);
@@ -36,116 +38,118 @@ static void provider_from_url(const char *api_url, char *out, size_t outlen);
 static cJSON *usage_object(long prompt_tokens, long completion_tokens,
                            long reasoning_tokens, long total_tokens);
 
-static void json_escape(const char *in, char *out, size_t outlen)
-{
-    size_t o = 0;
-    for (const unsigned char *p = (const unsigned char *)in; *p && o + 7 < outlen; p++) {
-        switch (*p) {
-        case '"':  out[o++] = '\\'; out[o++] = '"'; break;
-        case '\\': out[o++] = '\\'; out[o++] = '\\'; break;
-        case '\n': out[o++] = '\\'; out[o++] = 'n'; break;
-        case '\r': out[o++] = '\\'; out[o++] = 'r'; break;
-        case '\t': out[o++] = '\\'; out[o++] = 't'; break;
-        default:
-            if (*p < 0x20) {
-                snprintf(out + o, outlen - o, "\\u%04x", *p);
-                o += 6;
-            } else {
-                out[o++] = (char)*p;
-            }
-        }
-    }
-    out[o] = '\0';
-}
+/* Events + entry append helpers (defined below) — abort_run needs them. */
+static void emit_message_end(jb_session *sess, cJSON *message);
+static void emit_agent_end(jb_session *sess, cJSON *messages);
+static void append_or_warn(jb_session *sess, cJSON *msg);
 
 static void handle_signal(int sig)
 {
+    /* Async-signal-safe minimum: record the signal and kill the child
+       whose pipe the main loop is blocked reading. Killing curl (or the
+       tool child) closes the pipe → fgets/fread return EOF; the stdin
+       read gets EINTR (sigaction without SA_RESTART). The main loop then
+       reaches a checkpoint and runs abort_run() in normal context. */
+    g_signal = sig;
+    pid_t p;
+    if ((p = api_curl_pid()) > 0) kill(p, SIGTERM);
+    if ((p = tools_child_pid()) > 0) kill(p, SIGTERM);
+}
+
+/* Install SIGINT/SIGTERM handlers with no SA_RESTART, so blocking reads
+   return EINTR instead of restarting. */
+static void install_signal_handlers(void)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = handle_signal;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;  /* no SA_RESTART */
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+}
+
+/* Abort path — runs in NORMAL context, so cJSON/malloc/stdio are safe.
+   Records the aborted assistant entry, closes the events stream (G3: the
+   agent_end carries the final messages array), writes metadata status
+   "error" (reference §6 — the plan's "interrupted" was superseded; the
+   nuance lives in stopReason "aborted" + errorMessage), prints the
+   partial answer, then restores the default disposition and re-raises so
+   the OS reports genuine death-by-signal (shell sees 128+signal). */
+static void abort_run(int sig, cJSON *messages, const char *partial,
+                      const char *partial_thinking, long total_tokens, int turn)
+{
     if (g_session_active) {
-        /* Aborted assistant entry + interrupted metadata before dying.
-           The entry line is hand-built with snprintf — a signal handler
-           must not run cJSON/malloc (the interrupted code may hold the
-           allocator lock). Skipped when no header has been written yet
-           (the prompt never arrived — nothing to chain to).
-           Caveat: session_write_metadata_close uses cJSON; in practice
-           SIGINT lands while jb is blocked reading the SSE stream, where
-           no allocation is in progress. */
+        /* Header written? (ftell > 0 means the session.jsonl v3 header is
+           in place — a signal during stdin read has nothing to chain to). */
         if (ftell(g_session.session_fp) > 0) {
-            char id8[16], ts[40], ptext[4096], esc[8192];
-            jb_id8(id8, sizeof(id8));
-            jb_iso8601_ms(ts, sizeof(ts));
-            api_stream_text_snapshot(ptext, sizeof(ptext));
-            json_escape(ptext, esc, sizeof(esc));
-
-            /* provider/model from the config snapshot — empty when the
-               run never got past reading stdin (§3.3 shape) */
-            char provider[128], provq[160], modelq[160];
-            provider_from_url(g_session.cfg_snapshot.api_url, provider, sizeof(provider));
-            if (g_session.cfg_snapshot.model[0] && provider[0]) {
-                snprintf(provq, sizeof(provq), "\"provider\":\"%s\",", provider);
-                snprintf(modelq, sizeof(modelq), "\"model\":\"%s\",", g_session.cfg_snapshot.model);
-            } else {
-                snprintf(provq, sizeof(provq), "");
-                snprintf(modelq, sizeof(modelq), "");
+            cJSON *msg = cJSON_CreateObject();
+            cJSON_AddStringToObject(msg, "role", "assistant");
+            cJSON *content = cJSON_CreateArray();
+            /* Mirror what was streamed (§5): thinking at index 0 (when
+               reasoning arrived), then the text block — so deltas and
+               message_end agree for consumers. */
+            if (partial_thinking && partial_thinking[0]) {
+                cJSON *tblock = cJSON_CreateObject();
+                cJSON_AddStringToObject(tblock, "type", "thinking");
+                cJSON_AddStringToObject(tblock, "thinking", partial_thinking);
+                cJSON_AddStringToObject(tblock, "thinkingSignature",
+                                        "reasoning_content");
+                cJSON_AddItemToArray(content, tblock);
             }
-
-            char block[8256];
-            if (esc[0]) {
-                snprintf(block, sizeof(block),
-                    "[{\"type\":\"text\",\"text\":\"%s\"}]", esc);
-            } else {
-                snprintf(block, sizeof(block), "[]");
+            if (partial && partial[0]) {
+                cJSON *block = cJSON_CreateObject();
+                cJSON_AddStringToObject(block, "type", "text");
+                cJSON_AddStringToObject(block, "text", partial);
+                cJSON_AddItemToArray(content, block);
             }
+            cJSON_AddItemToObject(msg, "content", content);
+            cJSON_AddStringToObject(msg, "api", "openai-completions");
+            char provider[128] = "";
+            if (g_session.cfg_snapshot.api_url[0])
+                provider_from_url(g_session.cfg_snapshot.api_url,
+                                  provider, sizeof(provider));
+            if (provider[0])
+                cJSON_AddStringToObject(msg, "provider", provider);
+            if (g_session.cfg_snapshot.model[0])
+                cJSON_AddStringToObject(msg, "model", g_session.cfg_snapshot.model);
+            cJSON_AddItemToObject(msg, "usage", usage_object(0, 0, 0, 0));
+            cJSON_AddStringToObject(msg, "stopReason", "aborted");
+            char errmsg[128];
+            snprintf(errmsg, sizeof(errmsg), "interrupted by signal %d", sig);
+            cJSON_AddStringToObject(msg, "errorMessage", errmsg);
+            cJSON_AddNumberToObject(msg, "timestamp", jb_epoch_ms());
 
-            char parentq[24];
-            if (g_session.last_entry_id[0]) {
-                snprintf(parentq, sizeof(parentq), "\"%s\"", g_session.last_entry_id);
-            } else {
-                snprintf(parentq, sizeof(parentq), "null");
-            }
+            /* Entry through the normal chain bookkeeping — same code as
+               every other entry (§3.3 aborted shape). */
+            append_or_warn(&g_session, msg);
+            cJSON_AddItemToArray(messages, msg);
 
-            /* The aborted §3.3 message object — shared by the session.jsonl
-               entry and the events stream's message_end. */
-            char msgobj[12288];
-            snprintf(msgobj, sizeof(msgobj),
-                "{\"role\":\"assistant\",\"content\":%s,"
-                "%s%s"
-                "\"api\":\"openai-completions\",\"stopReason\":\"aborted\","
-                "\"errorMessage\":\"interrupted by signal %d\",\"timestamp\":%ld}",
-                block, provq, modelq, sig, jb_epoch_ms());
-
-            char line[12288];
-            snprintf(line, sizeof(line),
-                "{\"type\":\"message\",\"id\":\"%s\",\"parentId\":%s,"
-                "\"timestamp\":\"%s\","
-                "\"message\":%s}",
-                id8, parentq, ts, msgobj);
-            session_append_raw(&g_session, line);
-
-            /* Events stream (§5): the run was mid-message — close the
-               message with an aborted message_end, then agent_end so the
-               stream never dangles. Hand-built (no cJSON in a handler). */
-            if (g_msg_in_flight && g_session.events_fp) {
-                char ev[12304];
-                snprintf(ev, sizeof(ev),
-                    "{\"type\":\"message_end\",\"message\":%s}", msgobj);
-                session_append_event(&g_session, ev);
-            }
-            if (g_session.events_fp)
-                session_append_event(&g_session, "{\"type\":\"agent_end\"}");
+            /* Events stream (§5): close the in-flight message with an
+               aborted message_end, then agent_end with the final messages
+               array — the stream never dangles. */
+            if (g_msg_in_flight)
+                emit_message_end(&g_session, msg);
+            emit_agent_end(&g_session, messages);
         }
-        session_write_metadata_close(&g_session, "interrupted", 0, 0,
-                                     sig == SIGINT ? 130 : 143);
+        session_write_metadata_close(&g_session, "error", total_tokens,
+                                     turn, sig == SIGINT ? 130 : 143);
         session_close(&g_session);
         g_session_active = 0;
     }
-    if (g_partial_answer && g_partial_answer[0]) {
-        printf("%s\n", g_partial_answer);
+    if (partial && partial[0]) {
+        printf("%s\n", partial);
         fflush(stdout);
     }
-    _exit(sig == SIGINT ? 130 : 143);
+    /* Genuine death-by-signal: restore the default and re-raise. The
+       parent then sees WIFSIGNALED (shell: 128+signal = 130/143). */
+    signal(sig, SIG_DFL);
+    raise(sig);
+    _exit(sig == SIGINT ? 130 : 143);  /* unreachable — belt and braces */
 }
 
-/* Read all of stdin into a malloc'd string */
+/* Read all of stdin into a malloc'd string. Returns NULL on a caught
+   signal (the run aborts at the checkpoint) or on read error. */
 static char *read_stdin(void)
 {
     size_t cap = 4096;
@@ -154,12 +158,16 @@ static char *read_stdin(void)
     if (!buf) return NULL;
 
     size_t nread;
-    while ((nread = fread(buf + len, 1, cap - len - 1, stdin)) > 0) {
+    while (!g_signal && (nread = fread(buf + len, 1, cap - len - 1, stdin)) > 0) {
         len += nread;
         if (len + 1 >= cap) {
             cap *= 2;
             buf = realloc(buf, cap);
         }
+    }
+    if (g_signal) {
+        free(buf);
+        return NULL;
     }
     buf[len] = '\0';
     return buf;
@@ -285,16 +293,28 @@ static int api_chat_with_retry(const jb_config *cfg, const char *sys_prompt,
 
 /* ---- events.jsonl emission (§5) — the live stream ---- */
 
-/* Print + append one event line; emission errors never change the exit
-   code (§10 failure policy — the files are the record, the loop's source
-   of truth is in-memory). */
+/* Print + append one event line; emission errors are logged to stderr and
+   never change the exit code (§10 failure policy — the files are the
+   record, the loop's source of truth is in-memory). */
 static void emit_event(jb_session *sess, cJSON *ev)
 {
     char *s = cJSON_PrintUnformatted(ev);
     if (s) {
-        session_append_event(sess, s);
+        if (session_append_event(sess, s) != 0)
+            fprintf(stderr, "jb: warning: failed to write %s\n",
+                    sess->events_path);
         free(s);
     }
+}
+
+/* Append a pi message to session.jsonl; failures are logged to stderr and
+   never change the exit code (§10). The caller keeps ownership of msg
+   (it typically joins the in-memory messages array right after). */
+static void append_or_warn(jb_session *sess, cJSON *msg)
+{
+    if (session_append_message(sess, msg) != 0)
+        fprintf(stderr, "jb: warning: failed to append to %s\n",
+                sess->session_path);
 }
 
 /* Once per run. */
@@ -401,6 +421,11 @@ static void on_delta(const sse_delta *d, void *userdata)
         cJSON_AddNumberToObject(ame, "contentIndex", d->content_index);
         cJSON_AddStringToObject(ame, "delta", d->text);
         break;
+    case SSE_DELTA_THINKING:
+        cJSON_AddStringToObject(ame, "type", "thinking_delta");
+        cJSON_AddNumberToObject(ame, "contentIndex", d->content_index);
+        cJSON_AddStringToObject(ame, "delta", d->text);
+        break;
     case SSE_DELTA_TOOLCALL_START:
         cJSON_AddStringToObject(ame, "type", "toolcall_start");
         cJSON_AddNumberToObject(ame, "contentIndex", d->content_index);
@@ -495,6 +520,17 @@ static cJSON *assistant_message(const jb_config *cfg, const api_response *resp,
     cJSON_AddStringToObject(msg, "role", "assistant");
 
     cJSON *content = cJSON_CreateArray();
+    /* thinking block — when the provider streamed reasoning (§3.3 pi
+       shape: thinking + thinkingSignature, before the text block). The
+       wire conversion drops it on reload (§4 — OpenAI-compat requests
+       cannot carry reasoning back); the record keeps it. */
+    if (strcmp(stop_reason, "error") != 0 && resp->thinking && resp->thinking[0]) {
+        cJSON *block = cJSON_CreateObject();
+        cJSON_AddStringToObject(block, "type", "thinking");
+        cJSON_AddStringToObject(block, "thinking", resp->thinking);
+        cJSON_AddStringToObject(block, "thinkingSignature", "reasoning_content");
+        cJSON_AddItemToArray(content, block);
+    }
     /* text block — omitted when empty; never for error replies */
     if (strcmp(stop_reason, "error") != 0 && resp->text && resp->text[0]) {
         cJSON *block = cJSON_CreateObject();
@@ -838,9 +874,10 @@ static int cmd_run(const char *config_path, const char *const *overrides,
     /* Export our own identity so children inherit provenance */
     setenv("JB_SESSION", g_session.uuid, 1);
 
-    /* Install signal handlers */
-    signal(SIGINT, handle_signal);
-    signal(SIGTERM, handle_signal);
+    /* Install signal handlers — deferred pattern: the handler only sets
+       a flag and kills children; the loop below checks g_signal at safe
+       points and runs the abort path in normal context. */
+    install_signal_handlers();
 
     jb_session *sess = &g_session;
 
@@ -853,6 +890,10 @@ static int cmd_run(const char *config_path, const char *const *overrides,
 
     /* Read prompt from stdin */
     char *user_prompt = read_stdin();
+    if (g_signal) {
+        /* Killed while reading the prompt — close the session, re-raise. */
+        abort_run(g_signal, messages, NULL, NULL, 0, 0);
+    }
     if (!user_prompt || !user_prompt[0]) {
         fprintf(stderr, "jb: no prompt on stdin\n");
         session_close(sess);
@@ -887,7 +928,7 @@ static int cmd_run(const char *config_path, const char *const *overrides,
        ids, re-chained; the header's parentSession is the lineage link. */
     if (parent_uuid[0]) {
         for (cJSON *m = messages->child; m; m = m->next)
-            session_append_message(sess, m);
+            append_or_warn(sess, m);
     }
 
     /* Build the initial messages array — pi format (§3.3). For a fork it
@@ -928,6 +969,14 @@ static int cmd_run(const char *config_path, const char *const *overrides,
     int exit_code = 0;
 
     while (turn++ < max_turns) {
+        /* Checkpoint: a signal caught between turns must abort before a
+           new blocking read starts (the handler already consumed it — a
+           fresh curl child would block un-killed). */
+        if (g_signal) {
+            abort_run(g_signal, messages, g_partial_answer, NULL,
+                      total_tokens, turn);
+        }
+
         /* Check token budget */
         if (cfg.max_tokens > 0 && total_tokens >= cfg.max_tokens) {
             exit_code = 2;  /* budget exhausted */
@@ -943,15 +992,24 @@ static int cmd_run(const char *config_path, const char *const *overrides,
         int rc = api_chat_with_retry(&cfg, sys_prompt, messages, tools, &resp,
                                      on_delta, sess);
 
+        if (g_signal) {
+            /* Killed mid-stream: the handler killed curl, the read ended
+               with whatever was streamed so far — record it and die. */
+            abort_run(g_signal, messages,
+                      resp.text ? resp.text : g_partial_answer,
+                      resp.thinking, total_tokens, turn);
+        }
+
         if (rc != 0) {
             /* API error after retries — record it, stop */
             exit_code = 1;
             cJSON *err_msg = assistant_message(&cfg, &resp, "error",
                 resp.text ? resp.text : "API error");
             emit_message_end(sess, err_msg);
-            session_append_message(sess, err_msg);
+            append_or_warn(sess, err_msg);
             cJSON_AddItemToArray(messages, err_msg);
             free(resp.text);
+            free(resp.thinking);
             break;
         }
 
@@ -963,7 +1021,7 @@ static int cmd_run(const char *config_path, const char *const *overrides,
                toolCall blocks, persisted like every other entry */
             cJSON *assistant_msg = assistant_message(&cfg, &resp, "toolUse", NULL);
             emit_message_end(sess, assistant_msg);
-            session_append_message(sess, assistant_msg);
+            append_or_warn(sess, assistant_msg);
             cJSON_AddItemToArray(messages, assistant_msg);
 
             if (resp.text && resp.text[0]) {
@@ -990,13 +1048,26 @@ static int cmd_run(const char *config_path, const char *const *overrides,
 
                 cJSON *tool_msg = tool_result_message(id, name, result,
                                                       is_err);
-                session_append_message(sess, tool_msg);
+                append_or_warn(sess, tool_msg);
                 cJSON_AddItemToArray(messages, tool_msg);
                 free(result);
+
+                if (g_signal) {
+                    /* Killed while a tool was executing — the handler
+                       killed the child; the result above is whatever it
+                       produced. Record it and die. */
+                    abort_run(g_signal, messages, g_partial_answer, NULL,
+                              total_tokens, turn);
+                }
             }
+
+            /* Heartbeat (reference §6): the turn completed — refresh
+               last_activity so stuck-child detection works mid-run. */
+            session_write_metadata_heartbeat(sess);
 
             cJSON_Delete(resp.tool_calls_arr);
             free(resp.text);
+            free(resp.thinking);
             continue;
         }
 
@@ -1011,13 +1082,22 @@ static int cmd_run(const char *config_path, const char *const *overrides,
         /* Persist the assistant entry — session.jsonl is the record */
         cJSON *final_msg = assistant_message(&cfg, &resp, "stop", NULL);
         emit_message_end(sess, final_msg);
-        session_append_message(sess, final_msg);
+        append_or_warn(sess, final_msg);
         cJSON_AddItemToArray(messages, final_msg);
         free(resp.text);
+        free(resp.thinking);
         break;
     }
 
     free(sys_prompt);
+
+    /* Post-loop checkpoint: a signal that landed during the final writes
+       still aborts — the stream closes consistently and the metadata
+       records error (the run did not complete cleanly). */
+    if (g_signal) {
+        abort_run(g_signal, messages, g_partial_answer, NULL,
+                  total_tokens, turn);
+    }
 
     /* The stream's last line: agent_end with the final messages array */
     emit_agent_end(sess, messages);

@@ -1,11 +1,13 @@
 /* api.c — HTTP/SSE communication with Chat Completions API via curl */
 #include "api.h"
 #include "session.h"
+#include "subproc.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
 #include <unistd.h>
+#include <signal.h>
 
 /* ---- SSE line parser state ---- */
 
@@ -14,6 +16,13 @@ typedef struct {
     char *text;
     size_t text_len;
     size_t text_cap;
+
+    /* Accumulated reasoning (delta.reasoning_content) — the pi thinking
+       block source. Non-empty once the provider streams reasoning. */
+    char *thinking;
+    size_t thinking_len;
+    size_t thinking_cap;
+    int has_thinking;
 
     /* Accumulated tool calls — keyed by index */
     cJSON *tc_array;    /* array of objects: {index, id, name, arguments} */
@@ -30,16 +39,24 @@ typedef struct {
     /* Done flag */
     int done;
 
-    /* Delta callback (§5) — fires per text/toolcall delta */
+    /* Delta callback (§5) — fires per text/thinking/toolcall delta */
     sse_delta_cb delta_cb;
     void *delta_userdata;
 } sse_state;
 
-/* Points at the active sse_state's text while a stream is in flight — the
-   SIGINT handler snapshots it. NULL between api_chat calls (the buffer is
-   freed), so it is only valid while the main thread is inside the read
-   loop. */
-static const char *g_stream_text = NULL;
+/* The curl child's pid while a stream is in flight — the SIGINT/SIGTERM
+   handler kills it (async-signal-safe) to unblock the read. */
+static volatile sig_atomic_t g_curl_pid = 0;
+
+void api_set_curl_pid(pid_t pid)
+{
+    g_curl_pid = (volatile sig_atomic_t)pid;
+}
+
+pid_t api_curl_pid(void)
+{
+    return (pid_t)g_curl_pid;
+}
 
 static void sse_state_init(sse_state *st)
 {
@@ -48,6 +65,10 @@ static void sse_state_init(sse_state *st)
     st->text = malloc(st->text_cap);
     st->text[0] = '\0';
     st->text_len = 0;
+    st->thinking_cap = 4096;
+    st->thinking = malloc(st->thinking_cap);
+    st->thinking[0] = '\0';
+    st->thinking_len = 0;
     st->tc_array = cJSON_CreateArray();
 }
 
@@ -57,13 +78,26 @@ static void delta_fire(sse_state *st, const sse_delta *d)
     if (st->delta_cb) st->delta_cb(d, st->delta_userdata);
 }
 
-/* Fire the text delta for a content chunk (block 0). */
+/* Fire the text delta for a content chunk — block 1 when reasoning has
+   been streamed (the thinking block owns index 0), else block 0. */
 static void delta_fire_text(sse_state *st, const char *s)
 {
     if (!s || !s[0]) return;
     sse_delta d;
     memset(&d, 0, sizeof(d));
     d.kind = SSE_DELTA_TEXT;
+    d.content_index = st->has_thinking ? 1 : 0;
+    d.text = s;
+    delta_fire(st, &d);
+}
+
+/* Fire the thinking delta for a reasoning_content chunk (block 0). */
+static void delta_fire_thinking(sse_state *st, const char *s)
+{
+    if (!s || !s[0]) return;
+    sse_delta d;
+    memset(&d, 0, sizeof(d));
+    d.kind = SSE_DELTA_THINKING;
     d.content_index = 0;
     d.text = s;
     delta_fire(st, &d);
@@ -72,6 +106,7 @@ static void delta_fire_text(sse_state *st, const char *s)
 static void sse_state_free(sse_state *st)
 {
     free(st->text);
+    free(st->thinking);
     cJSON_Delete(st->tc_array);
 }
 
@@ -82,14 +117,21 @@ static void text_append(sse_state *st, const char *s)
         st->text_cap *= 2;
         st->text = realloc(st->text, st->text_cap);
     }
-    /* Keep the snapshot pointer valid and NUL-terminated at every
-       instruction boundary: assigned only after realloc, and the terminator
-       is written BEFORE the copy, so a signal landing mid-append can never
-       read a freed buffer or run past the end. */
-    g_stream_text = st->text;
-    st->text[st->text_len + slen] = '\0';
     memcpy(st->text + st->text_len, s, slen);
     st->text_len += slen;
+    st->text[st->text_len] = '\0';
+}
+
+static void thinking_append(sse_state *st, const char *s)
+{
+    size_t slen = strlen(s);
+    while (st->thinking_len + slen + 1 > st->thinking_cap) {
+        st->thinking_cap *= 2;
+        st->thinking = realloc(st->thinking, st->thinking_cap);
+    }
+    memcpy(st->thinking + st->thinking_len, s, slen);
+    st->thinking_len += slen;
+    st->thinking[st->thinking_len] = '\0';
 }
 
 /* Find or create a tool call accumulator by index */
@@ -102,10 +144,12 @@ static cJSON *tc_get_or_create(sse_state *st, int index)
     }
     cJSON *item = cJSON_CreateObject();
     cJSON_AddNumberToObject(item, "_index", index);
-    /* Content index (§5): toolCall blocks come after the text block, in
-       emission order — 0 when no text has been streamed. Computed at
-       creation; providers stream text before tool calls in practice. */
-    cJSON_AddNumberToObject(item, "_cindex", (st->text_len > 0 ? 1 : 0) + index);
+    /* Content index (§5): toolCall blocks come after the text block (and
+       after the thinking block when reasoning was streamed), in emission
+       order. Computed at creation; providers stream reasoning and text
+       before tool calls in practice. */
+    int base = (st->text_len > 0 ? 1 : 0) + (st->has_thinking ? 1 : 0);
+    cJSON_AddNumberToObject(item, "_cindex", base + index);
     cJSON_AddStringToObject(item, "id", "");
     cJSON_AddStringToObject(item, "name", "");
     cJSON_AddStringToObject(item, "arguments", "");
@@ -199,6 +243,16 @@ static void process_sse_data(sse_state *st, const char *data)
             if (content && cJSON_IsString(content) && content->valuestring) {
                 delta_fire_text(st, content->valuestring);
                 text_append(st, content->valuestring);
+            }
+
+            /* Reasoning delta (provider-specific: delta.reasoning_content)
+               — the thinking block source. The provider may send an empty
+               string in the first chunk; only non-empty fragments count. */
+            cJSON *rc = cJSON_GetObjectItemCaseSensitive(delta, "reasoning_content");
+            if (rc && cJSON_IsString(rc) && rc->valuestring && rc->valuestring[0]) {
+                if (!st->has_thinking) st->has_thinking = 1;
+                delta_fire_thinking(st, rc->valuestring);
+                thinking_append(st, rc->valuestring);
             }
 
             /* Tool call deltas */
@@ -424,6 +478,8 @@ void api_response_free(api_response *resp)
 {
     free(resp->text);
     resp->text = NULL;
+    free(resp->thinking);
+    resp->thinking = NULL;
     /* tool_calls_arr is owned by caller or not allocated */
 }
 
@@ -461,15 +517,19 @@ int api_chat(const jb_config *cfg, const char *sys_prompt, cJSON *messages,
         "-d @%s",
         url, key, tmpfile);
 
-    FILE *fp = popen(cmd, "r");
+    pid_t curl_pid = 0;
+    FILE *fp = subproc_open(cmd, &curl_pid);
     if (!fp) { remove(tmpfile); return -1; }
+    api_set_curl_pid(curl_pid);
 
     sse_state st;
     sse_state_init(&st);
     st.delta_cb = on_delta;
     st.delta_userdata = delta_userdata;
 
-    /* Read SSE lines */
+    /* Read SSE lines. When a signal kills the curl child (handler →
+       SIGTERM), the pipe closes and fgets returns EOF — the read never
+       hangs. */
     char line[65536];
     int first_line = 1;
     while (fgets(line, sizeof(line), fp)) {
@@ -488,8 +548,8 @@ int api_chat(const jb_config *cfg, const char *sys_prompt, cJSON *messages,
                     char *err_msg = cJSON_PrintUnformatted(err_obj);
                     resp->text = err_msg;
                     cJSON_Delete(err);
-                    g_stream_text = NULL;
-                    pclose(fp);
+                    api_set_curl_pid(0);
+                    subproc_close(fp, curl_pid);
                     remove(tmpfile);
                     return -1;
                 }
@@ -512,7 +572,8 @@ int api_chat(const jb_config *cfg, const char *sys_prompt, cJSON *messages,
         }
     }
 
-    int curl_status = pclose(fp);
+    int curl_status = subproc_close(fp, curl_pid);
+    api_set_curl_pid(0);
     remove(tmpfile);
 
     /* Stream over: fire toolcall_end for every accumulated tool call (§5) */
@@ -522,6 +583,8 @@ int api_chat(const jb_config *cfg, const char *sys_prompt, cJSON *messages,
     /* Fill response */
     resp->text = st.text;
     st.text = NULL;  /* transfer ownership */
+    resp->thinking = st.thinking;
+    st.thinking = NULL;  /* transfer ownership */
     resp->total_tokens = st.total_tokens;
     resp->prompt_tokens = st.prompt_tokens;
     resp->completion_tokens = st.completion_tokens;
@@ -533,8 +596,6 @@ int api_chat(const jb_config *cfg, const char *sys_prompt, cJSON *messages,
         resp->tool_calls_arr = cJSON_Duplicate(st.tc_array, 1);
     }
 
-    g_stream_text = NULL;  /* the buffer is about to be freed */
-
     if (curl_status != 0 && !st.done && st.text_len == 0) {
         sse_state_free(&st);
         return -1;
@@ -542,14 +603,4 @@ int api_chat(const jb_config *cfg, const char *sys_prompt, cJSON *messages,
 
     sse_state_free(&st);
     return 0;
-}
-
-void api_stream_text_snapshot(char *out, size_t outlen)
-{
-    if (!g_stream_text || !g_stream_text[0]) {
-        out[0] = '\0';
-        return;
-    }
-    strncpy(out, g_stream_text, outlen - 1);
-    out[outlen - 1] = '\0';
 }

@@ -1,10 +1,12 @@
 /* tools.c — tool definitions and implementations */
 #include "tools.h"
 #include "config.h"
+#include "subproc.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <signal.h>
 #include <sys/wait.h>
 
 /* External config — set from jb.c before tool execution */
@@ -14,6 +16,19 @@ static char g_session_uuid[64] = "";
 static char g_jb_path[4096] = "jb";  /* path to jb binary, default to $PATH lookup */
 static char g_config_path[4096] = "";  /* config file path for child inheritance */
 static int g_bash_counter = 0;
+
+/* The tool child currently executing — the signal handler kills it. */
+static volatile sig_atomic_t g_child_pid = 0;
+
+void tools_set_child_pid(pid_t pid)
+{
+    g_child_pid = (volatile sig_atomic_t)pid;
+}
+
+pid_t tools_child_pid(void)
+{
+    return (pid_t)g_child_pid;
+}
 
 void tools_set_limits(long max_lines, long max_bytes)
 {
@@ -486,11 +501,13 @@ static char *tool_bash(const char *arguments)
         snprintf(full_cmd, sizeof(full_cmd), "%s 2>&1", cmd);
     }
 
-    FILE *fp = popen(full_cmd, "r");
+    pid_t child_pid = 0;
+    FILE *fp = subproc_open(full_cmd, &child_pid);
     if (!fp) {
         cJSON_Delete(args);
         return strdup("Error: cannot execute command");
     }
+    tools_set_child_pid(child_pid);
 
     /* Read output with truncation */
     size_t cap = g_max_output_bytes + 1;
@@ -517,7 +534,8 @@ static char *tool_bash(const char *arguments)
     }
     output[total] = '\0';
 
-    int status = pclose(fp);
+    int status = subproc_close(fp, child_pid);
+    tools_set_child_pid(0);
     cJSON_Delete(args);
 
     /* Append exit code if non-zero */
@@ -623,12 +641,14 @@ static char *tool_jb(const char *arguments)
         }
     }
 
-    FILE *fp = popen(full_cmd, "r");
+    pid_t child_pid = 0;
+    FILE *fp = subproc_open(full_cmd, &child_pid);
     if (!fp) {
         unlink(tmpfile);
         cJSON_Delete(args);
         return strdup("Error: cannot execute jb");
     }
+    tools_set_child_pid(child_pid);
 
     /* Read output with truncation — same logic as tool_bash */
     size_t cap = (size_t)g_max_output_bytes + 1;
@@ -654,7 +674,8 @@ static char *tool_jb(const char *arguments)
     }
     output[total] = '\0';
 
-    int status = pclose(fp);
+    int status = subproc_close(fp, child_pid);
+    tools_set_child_pid(0);
     unlink(tmpfile);
     cJSON_Delete(args);
 

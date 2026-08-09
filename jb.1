@@ -406,12 +406,19 @@ not set.
 .TP
 .B 2
 Usage error: unknown command, missing prompt on stdin, bad arguments.
+.TP
+.B 130, 143
+Killed by SIGINT/SIGTERM: jb closes the session (aborted entry,
+metadata status error) and re-raises the signal, so the OS reports
+death-by-signal and the shell shows 128+signal.
 .
 .SH SIGNALS
 .TP
 .B SIGINT
-Interrupt the run: the assistant entry is recorded with stopReason
-aborted and the session closes with status error.
+Interrupt the run: the handler sets a flag and kills the in-flight
+child; the main loop closes the session in normal context (assistant
+entry with stopReason aborted, metadata status error, partial answer
+on stdout) and re-raises with the default disposition.
 .TP
 .B SIGTERM
 Same as SIGINT.

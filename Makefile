@@ -14,6 +14,7 @@ SRCS    = $(SRCDIR)/jb.c \
           $(SRCDIR)/tools.c \
           $(SRCDIR)/prompt.c \
           $(SRCDIR)/export.c \
+          $(SRCDIR)/subproc.c \
           $(VENDIR)/cJSON.c
 
 OBJS    = $(SRCS:.c=.o)

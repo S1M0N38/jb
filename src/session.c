@@ -148,13 +148,6 @@ int session_append_message(jb_session *sess, cJSON *message)
     return rc;
 }
 
-int session_append_raw(jb_session *sess, const char *json_line)
-{
-    /* Same write as session_append_pi; kept as a separate name so the
-       signal handler's intent is explicit (no chain bookkeeping). */
-    return session_append_pi(sess, json_line);
-}
-
 int session_append_event(jb_session *sess, const char *json_line)
 {
     if (!sess->events_fp) return -1;
@@ -420,17 +413,23 @@ void jb_id8(char *out, size_t outlen)
 
 void jb_iso8601_ms(char *out, size_t outlen)
 {
-    time_t now = time(NULL);
-    struct tm *gmt = gmtime(&now);
+    /* Real milliseconds (reference §3.1): clock_gettime, not time(NULL)
+       — time(NULL) has whole-second resolution, so the .mmm field would
+       be seconds-mod-1000 and same-second entries would collide. */
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    struct tm *gmt = gmtime(&ts.tv_sec);
     /* strftime "%Y-%m-%dT%H:%M:%S" + ".%03ldZ" */
     strftime(out, outlen - 8, "%Y-%m-%dT%H:%M:%S", gmt);
     size_t len = strlen(out);
-    snprintf(out + len, outlen - len, ".%03ldZ", now % 1000);
+    snprintf(out + len, outlen - len, ".%03ldZ", ts.tv_nsec / 1000000L);
 }
 
 long jb_epoch_ms(void)
 {
-    return (long)time(NULL) * 1000L;
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (long)ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
 }
 
 /* ---- Metadata (the jb index) ---- */
@@ -518,6 +517,49 @@ int session_write_metadata_close(jb_session *sess, const char *status,
     cJSON_AddNumberToObject(m, "tokens_used", tokens_used);
     cJSON_AddNumberToObject(m, "exit_code", exit_code);
     cJSON_AddStringToObject(m, "last_activity", ended_at);
+
+    char *s = cJSON_PrintUnformatted(m);
+    cJSON_Delete(m);
+    if (!s) return -1;
+    int rc = write_metadata_file(sess->metadata_path, s);
+    free(s);
+    return rc;
+}
+
+/* Read a whole file into a malloc'd NUL-terminated buffer (local copy —
+   meta.c's jb_read_file is a verb-layer helper). */
+static char *read_file_local(const char *path)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return NULL;
+    long sz;
+    if (fseek(f, 0, SEEK_END) != 0 || (sz = ftell(f)) < 0 ||
+        fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return NULL;
+    }
+    char *buf = malloc((size_t)sz + 1);
+    if (!buf) { fclose(f); return NULL; }
+    size_t got = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    buf[got] = '\0';
+    return buf;
+}
+
+/* Heartbeat (reference §6): rewrite metadata.json with a fresh
+   last_activity while the session is working. Read-modify-write, atomic
+   (temp + rename) — callers run one heartbeat per completed turn. */
+int session_write_metadata_heartbeat(jb_session *sess)
+{
+    char *json = read_file_local(sess->metadata_path);
+    if (!json) return -1;
+    cJSON *m = cJSON_Parse(json);
+    free(json);
+    if (!m) return -1;
+
+    char now[40];
+    jb_iso8601_ms(now, sizeof(now));
+    cJSON_AddStringToObject(m, "last_activity", now);
 
     char *s = cJSON_PrintUnformatted(m);
     cJSON_Delete(m);

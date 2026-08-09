@@ -253,7 +253,8 @@ int cmd_commit(int argc, char **argv)
        (amend) — anything else is a run in flight */
     if (strcmp(status, "completed") != 0 && strcmp(status, "error") != 0
         && strcmp(status, "committed") != 0) {
-        fprintf(stderr, "jb: session %s is working\n", sid);
+        fprintf(stderr, "jb: cannot commit %s — status is %s\n",
+                sid, status[0] ? status : "unknown");
         cJSON_Delete(m);
         return 1;
     }

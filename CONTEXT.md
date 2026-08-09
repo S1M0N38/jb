@@ -36,9 +36,9 @@ _Avoid_: Plugin, extension, module, GUI, TUI (jb has none of these)
 - **events.jsonl** — the live stream: pi json-mode, delta-only. First line is the session header (same object as session.jsonl's).
 - **metadata.json** — the jb index (see Language above).
 - **Temp files** — bash output exceeding `max_output_bytes` saved to `$TMPDIR/jb-<uuid>-bash-<N>.out` (respects `$TMPDIR`, defaults to `/tmp`). Path included in tool result.
-- **Exit codes**: 0 = success · 1 = error/not found/refused · 2 = usage.
+- **Exit codes**: 0 = success · 1 = error/not found/refused · 2 = usage. When the process is killed by a signal (SIGINT/SIGTERM), the OS reports death-by-signal — the shell sees 128+signal (130/143). jb catches the signal, closes the session, then re-raises with the default disposition so the parent sees a genuine signal death, not a faked exit code.
 - **Error retries**: network/429/5xx retried with backoff. Auth/400 errors exit immediately. Malformed tool arguments sent back to model as error for self-correction.
-- **Signal handling**: SIGPIPE = die (default). SIGINT/SIGTERM = kill child processes, record the assistant entry with `stopReason: "aborted"`, close the session with status error.
+- **Signal handling**: deferred pattern — the handler only sets a flag and kills the curl/tool child (async-signal-safe; no malloc/stdio/cJSON in a handler, ever). The main loop notices the flag at the next checkpoint and closes the session in normal context: assistant entry with `stopReason: "aborted"` + `errorMessage`, metadata status `error` (reference §6 enum — a killed session is a kind of failure; the nuance lives in the entry), partial answer on stdout. Then the default disposition is restored and the signal re-raised. SIGPIPE = die (default).
 - **No file locking**: concurrent jb processes are independent. Metadata writes are atomic; the files are the record of truth.
 
 ## Relationships
@@ -91,7 +91,8 @@ With a parent (fork), the header adds `"parentSession":"/abs/path/.jb/sessions/<
 Field rules:
 - `id`: 8 hex chars from `/dev/urandom`, collision-checked against ids already in the session.
 - `parentId`: id of the previous entry; `null` for the first. jb sessions are single-branch — a linear chain (pi's branch-export shape).
-- `timestamp`: ISO 8601 UTC with milliseconds (`2026-08-06T00:33:50.332Z`). `message.timestamp`: epoch ms — distinct from the entry timestamp; pi writes both, jb emits both.
+- `timestamp`: ISO 8601 UTC with **real** milliseconds (`2026-08-06T00:33:50.332Z`, from `clock_gettime(CLOCK_REALTIME)`). `message.timestamp`: epoch ms — distinct from the entry timestamp; pi writes both, jb emits both.
+- `thinking` blocks: when the provider streams reasoning (`delta.reasoning_content`), the assistant content opens with `{"type":"thinking","thinking":"…","thinkingSignature":"reasoning_content"}` (pi's exact shape — verified against real pi exports) before the text block. The wire conversion drops them on reload (§4 — OpenAI-compat requests cannot carry reasoning back); the record keeps them.
 - `toolCall.arguments`: parsed JSON object, not string. Unparseable → `{}`.
 - `toolName`: the tool name from the assistant's matching `toolCall`.
 - `isError`: `true` when the tool result is an error (exit code ≠ 0, or result starts with `Error:`).
@@ -102,7 +103,11 @@ Field rules:
 
 ### events.jsonl (the live stream)
 
-Format = pi `--mode json` with the 0.84 delta-only wire protocol: `message_update` carries **no cumulative `message`** and **no `partial`** — consumers assemble from `contentIndex` + `delta`; `message_end` is authoritative. Event types jb emits: `session` (header), `agent_start`, `message_start`, `message_update` (text_delta / thinking_delta / toolcall_start / toolcall_delta / toolcall_end), `message_end`, `tool_execution_start`, `tool_execution_end`, `agent_end`. No `turn_*`/`queue_*`/`compaction_*` events (jb has no steering, follow-ups, or compaction).
+Format = pi `--mode json` with the 0.84 delta-only wire protocol: `message_update` carries **no cumulative `message`** and **no `partial`** — consumers assemble from `contentIndex` + `delta`; `message_end` is authoritative. Event types jb emits: `session` (header), `agent_start`, `message_start`, `message_update` (text_delta / thinking_delta / toolcall_start / toolcall_delta / toolcall_end), `message_end`, `tool_execution_start`, `tool_execution_end`, `agent_end` (always with the final `messages` array — including on the abort path). No `turn_*`/`queue_*`/`compaction_*` events (jb has no steering, follow-ups, or compaction).
+
+### jb status
+
+`jb status` adds one deliberate extension over the reference §7: in the no-session view it prints a `working: N (…)` list before the `awaiting commit` line. It is the "what's running right now" glance and is intentionally kept.
 
 ## API contract (OpenAI Chat Completions)
 
