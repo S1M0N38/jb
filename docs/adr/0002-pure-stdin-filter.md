@@ -1,6 +1,6 @@
 # Pure stdin filter with no flags or arguments
 
-Status: superseded by the phase-2 CLI (12 verbs: init, run, commit, status, log, show, ps, wait, path, export, config, help). The core stance survives — `jb run` remains a stdin → agent loop → stdout filter — but jb is no longer a single-flag filter.
+Status: superseded by [ADR-0006](0006-storage-v2-pi-format.md) — the phase-2 CLI (12 verbs: init, run, commit, status, log, show, ps, wait, path, export, config, help) replaced the single-flag filter. The core stance survives — `jb run` remains a stdin → agent loop → stdout filter — but jb is no longer a pure filter with no flags.
 
 jb reads its prompt from stdin and writes the model's final answer to stdout. There are no CLI flags, no arguments, no interactive mode, no `-v`/`-q`/`--model` options. All configuration comes from `config.json` and environment variables.
 

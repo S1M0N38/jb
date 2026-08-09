@@ -1,6 +1,6 @@
 # Storage v2 — pi format, repo-scoped
 
-Status: accepted (supersedes ADR-0001, ADR-0004, ADR-0005)
+Status: accepted (supersedes ADR-0001, ADR-0002, ADR-0004, ADR-0005)
 
 ## Decision
 
