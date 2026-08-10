@@ -33,6 +33,9 @@ jb \- a git-inspired agentic coding loop (pi-compatible sessions)
 .RB "| " export
 .I ID
 .RI [ PATH ]
+.RB "| " ui
+.RI [ \-\-port\~N ]
+.RI [ \-\-dev ]
 .RB "| " config
 .RI [ \-\-global | \-\-local ]
 .RI [ KEY [ VALUE ]]
@@ -214,6 +217,25 @@ payload embedded.  The default filename is
 in the current directory.  Working sessions may be exported (snapshot
 semantics, no lock).  No gist upload \(em sharing is a manual
 .BR "gh gist create\ \-\-public=false" .
+.TP
+.B jb ui [\-\-port N] [\-\-dev]
+Serve the session forest viewer: a read-only localhost web UI over the
+repository's sessions.  Binds 127.0.0.1 only (default port 8787,
+.B \-\-port 0
+picks a free port), serves the embedded UI plus two JSON endpoints:
+.B GET /api/sessions
+(a list of every session: uuid, status, subject, author, parent,
+start/end times, exit code) and
+.B GET /api/session/ID
+(the raw metadata.json of one session).  The browser polls every 2s;
+nothing is written and no provider is contacted \(em the terminal stays
+in control.
+.B \-\-dev
+serves
+.B ui/
+from the repository root instead of the embedded copy (the ui/ source
+of truth is embedded at build time).  Prints the URL and opens the
+browser when stdout is a terminal; Ctrl-C stops the server.
 .TP
 .B jb config [\-\-global|\-\-local] [KEY [VALUE]]
 Git-style configuration: list effective settings (local merged over
@@ -456,6 +478,13 @@ Export the pi viewer and the linear JSONL:
 .nf
 .B jb export 9f3c2a1b /tmp/session.html
 .B jb export 9f3c2a1b /tmp/session.jsonl
+.fi
+.RE
+.PP
+Watch the session forest in the browser (Ctrl-C to stop):
+.RS
+.nf
+.B jb ui
 .fi
 .RE
 .PP

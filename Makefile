@@ -14,6 +14,7 @@ SRCS    = $(SRCDIR)/jb.c \
           $(SRCDIR)/tools.c \
           $(SRCDIR)/prompt.c \
           $(SRCDIR)/export.c \
+          $(SRCDIR)/ui.c \
           $(SRCDIR)/subproc.c \
           $(VENDIR)/cJSON.c
 
@@ -26,6 +27,10 @@ PREFIX ?= /usr/local
 # Vendored pi viewer assets (pi 0.84.1, MIT, pinned) -> src/assets.inc
 ASSETS  = $(SRCDIR)/assets.inc
 ASSET_FILES = $(wildcard $(VENDIR)/pi-export/*) $(wildcard $(VENDIR)/pi-export/vendor/*)
+
+# Embedded jb ui assets (ui/ is the source of truth) -> src/ui_assets.inc
+UI_ASSETS = $(SRCDIR)/ui_assets.inc
+UI_FILES = $(wildcard ui/*)
 
 .PHONY: all clean test install
 
@@ -42,8 +47,13 @@ $(ASSETS): $(ASSET_FILES) $(VENDIR)/pi-export/gen-assets.sh
 
 $(SRCDIR)/export.o: $(ASSETS)
 
+$(UI_ASSETS): $(UI_FILES) ui/gen-assets.sh
+	sh ui/gen-assets.sh
+
+$(SRCDIR)/ui.o: $(UI_ASSETS)
+
 clean:
-	rm -f $(OBJS) $(TARGET) $(ASSETS)
+	rm -f $(OBJS) $(TARGET) $(ASSETS) $(UI_ASSETS)
 
 install: $(TARGET)
 	mkdir -p $(PREFIX)/bin

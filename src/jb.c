@@ -12,6 +12,7 @@
 #include "meta.h"
 #include "commit.h"
 #include "export.h"
+#include "ui.h"
 #include "tools.h"
 #include "prompt.h"
 #include "version.h"
@@ -210,6 +211,7 @@ static void cmd_help(const char *verb)
     printf("  wait       wait for a session to finish\n");
     printf("  path       print a session's directory\n");
     printf("  export     export a session (HTML viewer / JSONL)\n");
+    printf("  ui         serve the session forest viewer (localhost HTTP)\n");
     printf("  config     get/set configuration\n");
     printf("  help       show this help\n");
     printf("\n");
@@ -742,6 +744,9 @@ int main(int argc, char **argv)
     }
     if (strcmp(verb, "export") == 0) {
         return cmd_export(argc - i - 1, argv + i + 1);
+    }
+    if (strcmp(verb, "ui") == 0) {
+        return cmd_ui(argc - i - 1, argv + i + 1);
     }
 
     fprintf(stderr, "jb: unknown command '%s' (see 'jb help')\n", verb);

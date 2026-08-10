@@ -17,3 +17,10 @@ jb
 # Python
 __pycache__
 src/assets.inc
+src/ui_assets.inc
+
+# Remove agents artifacts (kept on disk, not published)
+CONTEXT.md
+docs/adr
+paseo.json
+skills-lock.json

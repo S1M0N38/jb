@@ -14,6 +14,7 @@ The workflow borrows git's shape:
     jb status                        # current session + repo summary
     jb log --graph                   # the committed forest
     jb export 9f3c2a1b /tmp/s.html   # pi viewer HTML (self-contained)
+    jb ui                            # live session forest in the browser (Ctrl-C to stop)
 
 Sessions live under `.jb/sessions/<uuid>/` — `session.jsonl` (the
 conversation in pi session format v3), `events.jsonl` (the live stream),

@@ -5,6 +5,7 @@
 #define JB_META_H
 
 #include <stddef.h>
+#include "session.h"  /* JB_UUID_LEN */
 
 /* Shared CLI helpers (moved here from jb.c so verbs outside jb.c can use
    them): repo walk-up, ID argument resolution. */
@@ -32,6 +33,35 @@ char *jb_read_file(const char *path);
 
 /* jb_short_id — first 8 hex chars of a uuid (the log/status id form) */
 void jb_short_id(const char *uuid, char *out, size_t outlen);
+
+/* ---- session index: every session's metadata, scanned from
+   <repo>/.jb/sessions/ (shared by log/status and jb ui) ---- */
+
+typedef struct {
+    char uuid[JB_UUID_LEN];
+    char status[16];
+    char subject[256];
+    char author[JB_UUID_LEN];
+    char parent[JB_UUID_LEN];
+    long long started_ms;   /* epoch ms */
+    long long ended_ms;     /* epoch ms, 0 until has_ended */
+    long exit_code;
+    int has_ended;
+} session_rec;
+
+typedef struct {
+    session_rec *items;
+    int n;
+    int cap;
+} session_list;
+
+/* session_list_scan — load every session's metadata from
+   <repo>/.jb/sessions/. Unparseable dirs are skipped (a session dir
+   without metadata is not a session). Returns the number loaded. */
+int session_list_scan(const char *repo_root, session_list *list);
+
+/* session_list_free — release the list's backing array. */
+void session_list_free(session_list *list);
 
 /* jb path ID — print the absolute session directory. 0 · 1 not found · 2 usage */
 int cmd_path(const char *id_arg);

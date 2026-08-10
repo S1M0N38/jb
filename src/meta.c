@@ -171,25 +171,9 @@ static void print_pretty_2(cJSON *root)
     free(json);
 }
 
-/* ---- session scanner: reads every session's metadata.json ---- */
-
-typedef struct {
-    char uuid[JB_UUID_LEN];
-    char status[16];
-    char subject[256];
-    char author[JB_UUID_LEN];
-    char parent[JB_UUID_LEN];
-    long long started_ms;
-    long long ended_ms;
-    long exit_code;
-    int has_ended;
-} session_rec;
-
-typedef struct {
-    session_rec *items;
-    int n;
-    int cap;
-} session_list;
+/* ---- session scanner: reads every session's metadata.json ----
+   session_rec / session_list / session_list_scan / session_list_free are
+   declared in meta.h — shared with jb ui. */
 
 /* utc_to_epoch — days-from-civil (Hinnant) over UTC fields; no timegm. */
 static long long utc_to_epoch(int y, int mo, int d, int h, int mi, int s)
@@ -246,7 +230,7 @@ static void session_list_add(session_list *list, const session_rec *rec)
     list->items[list->n++] = *rec;
 }
 
-static void session_list_free(session_list *list)
+void session_list_free(session_list *list)
 {
     free(list->items);
     list->items = NULL;
@@ -256,7 +240,7 @@ static void session_list_free(session_list *list)
 /* session_list_scan — load every session's metadata from
    <repo>/.jb/sessions/. Unparseable dirs are skipped (a session dir
    without metadata is not a session). Returns the number loaded. */
-static int session_list_scan(const char *repo_root, session_list *list)
+int session_list_scan(const char *repo_root, session_list *list)
 {
     char sessions_dir[4096];
     snprintf(sessions_dir, sizeof(sessions_dir), "%s/.jb/sessions", repo_root);
