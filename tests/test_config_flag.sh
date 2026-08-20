@@ -80,6 +80,7 @@ _rel_dir="$SCRATCH/rel"
 mkdir -p "$_rel_dir"
 cat > "$_rel_dir/rel-config.json" <<EOF
 {
+  "api_url": "https://api.example.com/v1",
   "model": "relative-path-test",
   "max_tokens": 99999
 }
