@@ -36,7 +36,7 @@ case "$_l2" in
     *) fail "jb ps lists the older pending child second" "got: $_l2" ;;
 esac
 case "$_l1" in
-    *$'\t'[0-9]*:[0-9][0-9]$'\t'*) pass "jb ps age is mm:ss" ;;
+    *	[0-9]*:[0-9][0-9]	*) pass "jb ps age is mm:ss" ;;
     *) fail "jb ps age is mm:ss" "got: $_l1" ;;
 esac
 case "$_out" in
