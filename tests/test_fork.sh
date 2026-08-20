@@ -21,8 +21,13 @@ else
     fail "--fork ambiguous prefix exits 1" "got exit $_rc"
 fi
 _amb=$(cat "$SCRATCH/amb.err")
+# candidate order is filesystem-dependent (readdir) — assert presence only
 case "$_amb" in
-    *"jb: ambiguous id 'abc1'"*"abc12345"*"abc1ffff"*) pass "--fork ambiguous lists candidates" ;;
+    *"jb: ambiguous id 'abc1'"*"abc12345"*) : ;;
+    *) fail "--fork ambiguous lists candidates" "got: $_amb" ;;
+esac
+case "$_amb" in
+    *"abc1ffff"*) pass "--fork ambiguous lists candidates" ;;
     *) fail "--fork ambiguous lists candidates" "got: $_amb" ;;
 esac
 
