@@ -201,14 +201,14 @@ else
 fi
 
 # usage object: input/output/totalTokens ≥ 0, cost all zeros (jb has no pricing)
-if jq -e '.message.usage | (.input >= 0) and (.output >= 0) and (.totalTokens >= 0)' \
-    <<<"$_atail" >/dev/null 2>&1; then
+if printf '%s' "$_atail" | jq -e '.message.usage | (.input >= 0) and (.output >= 0) and (.totalTokens >= 0)' \
+    >/dev/null 2>&1; then
     pass "assistant entry usage has input/output/totalTokens"
 else
     fail "assistant entry usage has input/output/totalTokens" \
         "$(printf '%s' "$_atail" | jq -c '.message.usage // "missing"' 2>/dev/null)"
 fi
-if jq -e '.message.usage.cost.total == 0' <<<"$_atail" >/dev/null 2>&1; then
+if printf '%s' "$_atail" | jq -e '.message.usage.cost.total == 0' >/dev/null 2>&1; then
     pass "assistant entry usage cost is zeroed"
 else
     fail "assistant entry usage cost is zeroed" \

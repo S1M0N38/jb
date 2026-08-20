@@ -11,13 +11,13 @@ _meta_path="$JB_SESSIONS_DIR/$_uuid/metadata.json"
 # full uuid → valid JSON with the fixture's data, exit 0
 _out=$("$JB" show "$_uuid" 2>/dev/null)
 _rc=$?
-if [ "$_rc" -eq 0 ] && jq empty <<<"$_out" >/dev/null 2>&1; then
+if [ "$_rc" -eq 0 ] && printf '%s' "$_out" | jq empty >/dev/null 2>&1; then
     pass "jb show <id> prints valid JSON"
 else
     fail "jb show <id> prints valid JSON" "exit $_rc, out: $(echo "$_out" | head -c 120)"
 fi
-_st=$(jq -r '.status' <<<"$_out" 2>/dev/null)
-_su=$(jq -r '.subject' <<<"$_out" 2>/dev/null)
+_st=$(printf '%s' "$_out" | jq -r '.status' 2>/dev/null)
+_su=$(printf '%s' "$_out" | jq -r '.subject' 2>/dev/null)
 if [ "$_st" = "completed" ] && [ "$_su" = "the fixture subject" ]; then
     pass "jb show <id> prints the fixture metadata (untouched)"
 else
@@ -46,7 +46,7 @@ esac
 
 # ID defaults to @ when $JB_SESSION is set
 _out=$(JB_SESSION="$_uuid" "$JB" show 2>/dev/null)
-if [ "$(jq -r .uuid <<<"$_out" 2>/dev/null)" = "$_uuid" ]; then
+if [ "$(printf '%s' "$_out" | jq -r .uuid 2>/dev/null)" = "$_uuid" ]; then
     pass "jb show defaults to @ when JB_SESSION is set"
 else
     fail "jb show defaults to @ when JB_SESSION is set" "got: $(echo "$_out" | head -c 80)"
@@ -54,7 +54,7 @@ fi
 
 # explicit @
 _out=$(JB_SESSION="$_uuid" "$JB" show @ 2>/dev/null)
-if [ "$(jq -r .uuid <<<"$_out" 2>/dev/null)" = "$_uuid" ]; then
+if [ "$(printf '%s' "$_out" | jq -r .uuid 2>/dev/null)" = "$_uuid" ]; then
     pass "jb show @ resolves via JB_SESSION"
 else
     fail "jb show @ resolves via JB_SESSION" "got: $(echo "$_out" | head -c 80)"

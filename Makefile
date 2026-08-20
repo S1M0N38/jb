@@ -42,6 +42,9 @@ $(TARGET): $(OBJS)
 %.o: %.c
 	$(CC) $(CFLAGS) -I$(SRCDIR) -I$(VENDIR) -c -o $@ $<
 
+# version.h is included by jb.c — rebuild when it changes (version bumps)
+$(SRCDIR)/jb.o: $(SRCDIR)/version.h
+
 $(ASSETS): $(ASSET_FILES) $(VENDIR)/pi-export/gen-assets.sh
 	sh $(VENDIR)/pi-export/gen-assets.sh
 
