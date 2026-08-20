@@ -29,4 +29,8 @@ int config_global_path(char *out, size_t outlen);
    or NULL if config hasn't been loaded yet. */
 const char *config_get_resolved_path(void);
 
+/* config_validate — api_url and model are required (no built-in defaults).
+   Prints a bootstrap hint on failure. Returns 0 if both are set. */
+int config_validate(const jb_config *cfg);
+
 #endif

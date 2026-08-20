@@ -117,7 +117,9 @@ fixture_session() {
             printf '  "ended_at": "%s",\n' "$_fs_end"
         fi
         printf '  "working_dir": "%s",\n' "$SCRATCH"
-        printf '  "config": {"api_url":"https://api.openai.com/v1","model":"gpt-4.1","max_tokens":500000,"max_output_lines":2000,"max_output_bytes":51200},\n'
+    printf '  "config": {"api_url":"%s","model":"%s","max_tokens":500000,"max_output_lines":2000,"max_output_bytes":51200},\n' \
+        "$(sed -n 's/.*"api_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SCRATCH/.config/jb/config.json" 2>/dev/null | head -1)" \
+        "$(sed -n 's/.*"model"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SCRATCH/.config/jb/config.json" 2>/dev/null | head -1)"
         printf '  "turns": 1, "tokens_used": 10, "exit_code": %s,\n' "$_fs_exit"
         printf '  "last_activity": "%s"\n' "$_fs_end"
         printf '}\n'

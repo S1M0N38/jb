@@ -354,8 +354,8 @@ overrides.
 .RS
 .nf
 {
-    "api_url": "https://api.openai.com/v1",
-    "model": "gpt-4.1",
+    "api_url": "https://opencode.ai/zen/go/v1",
+    "model": "mimo-v2.5",
     "max_tokens": 500000,
     "max_output_lines": 2000,
     "max_output_bytes": 51200
@@ -363,9 +363,25 @@ overrides.
 .fi
 .RE
 .PP
-All fields are optional.  Defaults are shown above.  The effective
+.I api_url
+and
+.I model
+are required: jb ships no built-in default endpoint or model.  The
+remaining fields are optional (the limits above are the defaults).  The
+effective
 configuration is snapshotted into each session's metadata.json at run
 time \(em the replication record.
+.PP
+To bootstrap, use the
+.B jb config
+verb:
+.PP
+.RS
+.nf
+jb config --global api_url https://opencode.ai/zen/go/v1
+jb config --global model mimo-v2.5
+.fi
+.RE
 .
 .SH ENVIRONMENT
 .TP

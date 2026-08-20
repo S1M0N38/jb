@@ -102,8 +102,9 @@ else
 fi
 
 # commit preserves the other metadata fields (config snapshot, turns…)
+_cfg_model=$(sed -n 's/.*"model"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SCRATCH/.config/jb/config.json" 2>/dev/null | head -1)
 if [ "$(printf '%s' "$_m" | jq -r '.turns')" = "1" ] \
-   && [ "$(printf '%s' "$_m" | jq -r '.config.model')" = "gpt-4.1" ]; then
+   && [ "$(printf '%s' "$_m" | jq -r '.config.model')" = "$_cfg_model" ]; then
     pass "jb commit preserves the rest of the metadata"
 else
     fail "jb commit preserves the rest of the metadata"

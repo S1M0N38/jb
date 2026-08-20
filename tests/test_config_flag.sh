@@ -30,7 +30,7 @@ esac
 
 # --config specified twice → exit 2 (usage)
 _tmpcfg="$SCRATCH/cfg-dup.json"
-printf '{"model":"gpt-4.1"}' > "$_tmpcfg"
+printf '{"api_url":"https://api.example.com/v1","model":"test-dup"}' > "$_tmpcfg"
 _err3=$(echo "hi" | "$JB" run --config "$_tmpcfg" --config "$_tmpcfg" 2>&1 >/dev/null)
 _rc3=$?
 if [ "$_rc3" -eq 2 ]; then

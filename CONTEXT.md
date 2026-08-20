@@ -190,7 +190,7 @@ jb wait 9f3c2a1b                         # poll until completed/error
 jb path 9f3c2a1b                         # print the session directory
 jb export 9f3c2a1b /tmp/s.html           # pi viewer HTML
 jb ui                                    # session forest viewer (localhost HTTP, Ctrl-C to stop)
-jb config model gpt-4.1                  # git-style config get/set
+jb config model mimo-v2.5                # git-style config get/set
 jb help [VERB]                           # the command reference
 ```
 
@@ -219,15 +219,15 @@ Git-style, two files, local merged over global; per-run `-c` overrides:
 
 ```json
 {
-  "api_url": "https://api.openai.com/v1",
-  "model": "gpt-4.1",
+  "api_url": "https://opencode.ai/zen/go/v1",
+  "model": "mimo-v2.5",
   "max_tokens": 500000,
   "max_output_lines": 2000,
   "max_output_bytes": 51200
 }
 ```
 
-All fields are optional. Any key is accepted and stored as a string, coerced at use. The effective configuration is snapshotted into each session's `metadata.json` at run time — the replication record.
+`api_url` and `model` are required — **jb ships no default endpoint or model**; the remaining fields are optional (the limits above are the defaults). Any key is accepted and stored as a string, coerced at use. Bootstrap with `jb config --global api_url …` and `jb config --global model …`. The effective configuration is snapshotted into each session's `metadata.json` at run time — the replication record.
 
 ## Documentation
 

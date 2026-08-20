@@ -878,6 +878,12 @@ static int cmd_run(const char *config_path, const char *const *overrides,
         /* unknown keys silently ignored */
     }
 
+    /* Per-run overrides applied — re-validate (a -c model=... could be the
+       only configured value). */
+    if (config_validate(&cfg) != 0) {
+        return 1;
+    }
+
     /* Pass resolved config path to tools for child jb inheritance */
     tools_set_config_path(config_get_resolved_path());
 
