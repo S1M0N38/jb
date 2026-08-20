@@ -48,8 +48,11 @@ case "$_ll" in
 esac
 
 # format: id<TAB>status<TAB>author<TAB>age<TAB>subject
+# pattern built at runtime (dash's parser treats a raw tab as whitespace
+# and cannot hold one in a case pattern — see the Pi portability pass)
+_LOG_LINE_PATTERN=$(printf 'deadbeef\tcompleted\t-\t[0-9]*[smhd]\tcompleted X')
 case "$_l1" in
-    deadbeef	completed	-	[0-9]*[smhd]	completed X) pass "jb log line format id/status/author/age/subject" ;;
+    $_LOG_LINE_PATTERN) pass "jb log line format id/status/author/age/subject" ;;
     *) fail "jb log line format id/status/author/age/subject" "got: $_l1" ;;
 esac
 

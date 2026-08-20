@@ -35,8 +35,9 @@ case "$_l2" in
     "b3586600	error	"*'"child old"') pass "jb ps lists the older pending child second" ;;
     *) fail "jb ps lists the older pending child second" "got: $_l2" ;;
 esac
+_PS_AGE_PATTERN=$(printf '*\t[0-9]*:[0-9][0-9]\t*')
 case "$_l1" in
-    *	[0-9]*:[0-9][0-9]	*) pass "jb ps age is mm:ss" ;;
+    $_PS_AGE_PATTERN) pass "jb ps age is mm:ss" ;;
     *) fail "jb ps age is mm:ss" "got: $_l1" ;;
 esac
 case "$_out" in
