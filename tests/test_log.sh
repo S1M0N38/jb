@@ -49,7 +49,7 @@ esac
 
 # format: id<TAB>status<TAB>author<TAB>age<TAB>subject
 case "$_l1" in
-    deadbeef	completed	-	[0-9]*[smhd]	"completed X") pass "jb log line format id/status/author/age/subject" ;;
+    deadbeef	completed	-	[0-9]*[smhd]	completed X) pass "jb log line format id/status/author/age/subject" ;;
     *) fail "jb log line format id/status/author/age/subject" "got: $_l1" ;;
 esac
 
