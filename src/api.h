@@ -49,8 +49,8 @@ void api_response_init(api_response *resp);
 
 /* Send the pi-format messages array to the API and stream the response.
    The system prompt is prepended at request time — never persisted.
-   max_tokens caps the completion when > 0 (0 = omit — the run loop's
-   budget is enforced client-side, the commit generation caps at ~512).
+   max_tokens caps the completion when > 0 (0 = omit — the run loop sends
+   no cap; the commit generation caps at ~512).
    json_mode sends response_format {"type":"json_object"} — the commit
    generation's retry uses it to force a parseable reply.
    Returns 0 on success, -1 on error.

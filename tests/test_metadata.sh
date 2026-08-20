@@ -85,7 +85,7 @@ if [ -n "$_real_model" ] && [ "$_meta_model" = "$_real_model" ]; then
 else
     fail "config snapshot: model matches" "expected $_real_model, got $_meta_model"
 fi
-for _k in api_url max_tokens max_output_lines max_output_bytes; do
+for _k in api_url model; do
     if jq -e ".config.$_k != null" "$_meta" >/dev/null 2>&1; then
         pass "config snapshot has $_k"
     else

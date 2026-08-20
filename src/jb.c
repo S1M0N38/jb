@@ -858,24 +858,17 @@ static int cmd_run(const char *config_path, const char *const *overrides,
     }
 
     /* -c KEY=VALUE overrides (global flag, repeatable) — applied to this
-       run only, never persisted. Unknown keys are silently ignored
-       (git-style tolerance: values are coerced at use). */
+       run only, never persisted. Typed and validated via the config
+       registry; unknown keys warn (typos are loud, forward-compat kept). */
     for (int k = 0; k < override_count; k++) {
         const char *eq = strchr(overrides[k], '=');
         if (!eq) continue;
-        size_t klen = (size_t)(eq - overrides[k]);
-        const char *val = eq + 1;
-        if (klen == 5 && strncmp(overrides[k], "model", 5) == 0)
-            strncpy(cfg.model, val, sizeof(cfg.model) - 1);
-        else if (klen == 7 && strncmp(overrides[k], "api_url", 7) == 0)
-            strncpy(cfg.api_url, val, sizeof(cfg.api_url) - 1);
-        else if (klen == 10 && strncmp(overrides[k], "max_tokens", 10) == 0)
-            cfg.max_tokens = atol(val);
-        else if (klen == 16 && strncmp(overrides[k], "max_output_lines", 16) == 0)
-            cfg.max_output_lines = atol(val);
-        else if (klen == 16 && strncmp(overrides[k], "max_output_bytes", 16) == 0)
-            cfg.max_output_bytes = atol(val);
-        /* unknown keys silently ignored */
+        char *key = strndup(overrides[k], (size_t)(eq - overrides[k]));
+        if (config_apply_override(&cfg, key, eq + 1) != 0) {
+            free(key);
+            return 1;
+        }
+        free(key);
     }
 
     /* Per-run overrides applied — re-validate (a -c model=... could be the
@@ -991,14 +984,14 @@ static int cmd_run(const char *config_path, const char *const *overrides,
 
     /* Get tool definitions */
     cJSON *tools = tools_get_definitions();
-    tools_set_limits(cfg.max_output_lines, cfg.max_output_bytes);
+    tools_set_limits(JB_MAX_OUTPUT_LINES, JB_MAX_OUTPUT_BYTES);
     tools_set_session(sess->uuid);
 
     emit_agent_start(sess);
 
     /* Agentic loop */
     long total_tokens = 0;
-    int max_turns = 50;  /* safety limit */
+    int max_turns = JB_MAX_TURNS;  /* fixed safety limit */
     int turn = 0;
     int exit_code = 0;
 
@@ -1011,9 +1004,11 @@ static int cmd_run(const char *config_path, const char *const *overrides,
                       total_tokens, turn);
         }
 
-        /* Check token budget */
-        if (cfg.max_tokens > 0 && total_tokens >= cfg.max_tokens) {
-            exit_code = 2;  /* budget exhausted */
+        /* Check token budget (fixed limit — client-side stop). Exhaustion
+           is a normal stop with a partial answer, not an error. */
+        if (total_tokens >= JB_TOKEN_BUDGET) {
+            fprintf(stderr, "jb: token budget exhausted (%ld tokens)\n",
+                    total_tokens);
             break;
         }
 
@@ -1067,6 +1062,17 @@ static int cmd_run(const char *config_path, const char *const *overrides,
             /* Execute each tool; each result becomes a toolResult entry.
                The live stream shows start → end around the execution. */
             int n_tc = cJSON_GetArraySize(resp.tool_calls_arr);
+            if (n_tc == 0) {
+                /* Provider said tool_calls but shipped an empty batch —
+                   don't spin to the turn ceiling; treat as a final
+                   answer and stop. */
+                fprintf(stderr,
+                        "jb: warning: provider returned an empty tool call "
+                        "batch; ending the run\n");
+                free(resp.text);
+                free(resp.thinking);
+                break;
+            }
             for (int i = 0; i < n_tc; i++) {
                 cJSON *tc = cJSON_GetArrayItem(resp.tool_calls_arr, i);
                 const char *id = cJSON_GetObjectItemCaseSensitive(tc, "id")->valuestring;

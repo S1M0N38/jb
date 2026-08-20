@@ -461,9 +461,6 @@ static void add_config_snapshot(cJSON *obj, const jb_config *cfg)
     cJSON *c = cJSON_CreateObject();
     cJSON_AddStringToObject(c, "api_url", cfg->api_url);
     cJSON_AddStringToObject(c, "model", cfg->model);
-    cJSON_AddNumberToObject(c, "max_tokens", cfg->max_tokens);
-    cJSON_AddNumberToObject(c, "max_output_lines", cfg->max_output_lines);
-    cJSON_AddNumberToObject(c, "max_output_bytes", cfg->max_output_bytes);
     cJSON_AddItemToObject(obj, "config", c);
 }
 

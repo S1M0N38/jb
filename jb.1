@@ -355,20 +355,16 @@ overrides.
 .nf
 {
     "api_url": "https://opencode.ai/zen/go/v1",
-    "model": "mimo-v2.5",
-    "max_tokens": 500000,
-    "max_output_lines": 2000,
-    "max_output_bytes": 51200
+    "model": "mimo-v2.5"
 }
 .fi
 .RE
 .PP
-.I api_url
-and
-.I model
-are required: jb ships no built-in default endpoint or model.  The
-remaining fields are optional (the limits above are the defaults).  The
-effective
+The config is deliberately minimal: exactly these two keys, both required
+\- jb ships no built-in default endpoint or model, and no other keys are
+supported (unknown keys warn and are ignored).  Every limit \- the turn
+ceiling, the token budget, and tool output truncation \- is a fixed
+constant.  The effective
 configuration is snapshotted into each session's metadata.json at run
 time \(em the replication record.
 .PP

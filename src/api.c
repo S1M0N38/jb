@@ -446,8 +446,8 @@ static char *build_request_body(const jb_config *cfg, const char *sys_prompt,
     /* tools: NULL disables tool calling entirely (commit's message
        generation — cJSON_AddItemReferenceToObject no-ops on NULL) */
     if (tools) cJSON_AddItemReferenceToObject(root, "tools", tools);
-    /* max_tokens: 0 omits the field (run loop — the budget is enforced
-       client-side); the commit generation caps at ~512 tokens (§7) */
+    /* max_tokens: 0 omits the field (run loop — no API cap is sent); the
+       commit generation caps at ~512 tokens (§7) */
     if (max_tokens > 0)
         cJSON_AddNumberToObject(root, "max_tokens", max_tokens);
     /* json_mode: enforce a JSON reply — the commit generation's retry

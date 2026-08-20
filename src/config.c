@@ -1,7 +1,16 @@
-/* config.c — configuration loading from XDG config path */
+/* config.c — configuration loading and merging.
+ *
+ * The config is deliberately minimal: exactly two keys, both required —
+ * api_url (where to send requests) and model (which model). Every limit
+ * (turn ceiling, token budget, tool output truncation) is a hardcoded
+ * constant (see config.h); no endpoint or model identity is baked in.
+ *
+ * Unknown keys warn (typos are loud; forward-compat is preserved).
+ */
 #include "config.h"
 #include "meta.h"
 #include "cJSON.h"
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -44,45 +53,75 @@ int config_global_path(char *out, size_t outlen)
     return 0;
 }
 
-/* num_or_str — values are stored as strings by jb config; the reader
-   coerces (git-style tolerance). */
-static long num_or_str(const cJSON *v, long fallback)
+/* ---- the key registry: the single source of truth for config keys.
+   Minimal today (api_url + model); add keys here, not by hand-editing
+   parse/override code in three files. ---- */
+
+typedef struct {
+    const char *name;  /* config key */
+    size_t offset;     /* offsetof(jb_config, member) */
+    size_t size;       /* buffer size */
+    unsigned required:1;
+} cfg_key_def;
+
+#define KEY(name, member, req) \
+    { name, offsetof(jb_config, member), sizeof(((jb_config *)0)->member), req }
+
+static const cfg_key_def g_keys[] = {
+    KEY("api_url", api_url, 1),
+    KEY("model",   model,   1),
+};
+#define N_KEYS (sizeof(g_keys) / sizeof(g_keys[0]))
+
+static const cfg_key_def *find_key(const char *name)
 {
-    if (cJSON_IsNumber(v)) return (long)v->valuedouble;
-    if (cJSON_IsString(v) && v->valuestring) return atol(v->valuestring);
-    return fallback;
+    for (size_t i = 0; i < N_KEYS; i++)
+        if (strcmp(g_keys[i].name, name) == 0) return &g_keys[i];
+    return NULL;
 }
 
-/* overlay_file — apply a config file's known keys onto cfg (missing file
-   is a no-op). Used for the local .jb/config.json merge. */
-static void overlay_file(jb_config *cfg, const char *path)
+/* apply_json — iterate a config file's keys through the registry.
+   Unknown keys warn. Returns -1 (with a stderr message) on a type error. */
+static int apply_json(jb_config *cfg, cJSON *root, const char *label)
 {
-    char *json = read_file(path);
-    if (!json) return;
-    cJSON *root = cJSON_Parse(json);
-    free(json);
-    if (!root) { cJSON_Delete(root); return; }
-
-    cJSON *v;
-    v = cJSON_GetObjectItemCaseSensitive(root, "api_url");
-    if (cJSON_IsString(v) && v->valuestring)
-        strncpy(cfg->api_url, v->valuestring, sizeof(cfg->api_url) - 1);
-    v = cJSON_GetObjectItemCaseSensitive(root, "model");
-    if (cJSON_IsString(v) && v->valuestring)
-        strncpy(cfg->model, v->valuestring, sizeof(cfg->model) - 1);
-    v = cJSON_GetObjectItemCaseSensitive(root, "max_tokens");
-    cfg->max_tokens = num_or_str(v, cfg->max_tokens);
-    v = cJSON_GetObjectItemCaseSensitive(root, "max_output_lines");
-    cfg->max_output_lines = num_or_str(v, cfg->max_output_lines);
-    v = cJSON_GetObjectItemCaseSensitive(root, "max_output_bytes");
-    cfg->max_output_bytes = num_or_str(v, cfg->max_output_bytes);
-
-    cJSON_Delete(root);
+    for (cJSON *it = root->child; it; it = it->next) {
+        if (!it->string) continue;
+        const cfg_key_def *k = find_key(it->string);
+        if (!k) {
+            fprintf(stderr, "jb: config: %s: unknown key '%s' (ignored)\n",
+                    label, it->string);
+            continue;
+        }
+        if (!cJSON_IsString(it) || !it->valuestring) {
+            fprintf(stderr, "jb: config: %s: %s: expected a string\n",
+                    label, k->name);
+            return -1;
+        }
+        char *dst = (char *)cfg + k->offset;
+        strncpy(dst, it->valuestring, k->size - 1);
+        dst[k->size - 1] = '\0';
+    }
+    return 0;
 }
 
-/* config_validate — api_url and model are required (no built-in defaults).
-   Prints a bootstrap hint on failure. Called after the config merge and
-   again after per-run -c overrides in cmd_run(). */
+/* config_apply_override — apply one -c KEY=VALUE override through the
+   registry. Unknown keys warn. Returns -1 on error (printed). */
+int config_apply_override(jb_config *cfg, const char *key, const char *val)
+{
+    const cfg_key_def *k = find_key(key);
+    if (!k) {
+        fprintf(stderr, "jb: config: unknown key '%s' (ignored)\n", key);
+        return 0;
+    }
+    char *dst = (char *)cfg + k->offset;
+    strncpy(dst, val, k->size - 1);
+    dst[k->size - 1] = '\0';
+    return 0;
+}
+
+/* config_validate — api_url and model are required; jb ships no default
+   endpoint or model identity. Prints a bootstrap hint on failure. Also
+   called again after -c overrides in cmd_run(). */
 int config_validate(const jb_config *cfg)
 {
     if (!cfg->api_url[0] || !cfg->model[0]) {
@@ -97,17 +136,12 @@ int config_validate(const jb_config *cfg)
 
 int config_load(jb_config *cfg, const char *config_path)
 {
-    /* Defaults — limits only. api_url and model are required and have NO
-       defaults: jb ships no endpoint or model identity (see jb.1). */
     memset(cfg, 0, sizeof(*cfg));
-    cfg->max_tokens = 500000;
-    cfg->max_output_lines = 2000;
-    cfg->max_output_bytes = 51200;
 
     /* Build config path */
     char path[4096];
     if (config_path) {
-        /* Resolve to absolute path */
+        /* Resolve to absolute path so relative --config works from any cwd */
         if (!realpath(config_path, path)) {
             fprintf(stderr, "jb: config: %s: No such file or directory\n", config_path);
             return -1;
@@ -128,32 +162,16 @@ int config_load(jb_config *cfg, const char *config_path)
                     "  jb config --global model mimo-v2.5\n",
                     path);
         }
-        return -1;  /* config file must exist */
+        return -1;
     }
 
     cJSON *root = cJSON_Parse(json);
     free(json);
-    if (!root) return -1;
-
-    cJSON *v;
-
-    v = cJSON_GetObjectItemCaseSensitive(root, "api_url");
-    if (cJSON_IsString(v) && v->valuestring)
-        strncpy(cfg->api_url, v->valuestring, sizeof(cfg->api_url) - 1);
-
-    v = cJSON_GetObjectItemCaseSensitive(root, "model");
-    if (cJSON_IsString(v) && v->valuestring)
-        strncpy(cfg->model, v->valuestring, sizeof(cfg->model) - 1);
-
-    v = cJSON_GetObjectItemCaseSensitive(root, "max_tokens");
-    cfg->max_tokens = num_or_str(v, cfg->max_tokens);
-
-    v = cJSON_GetObjectItemCaseSensitive(root, "max_output_lines");
-    cfg->max_output_lines = num_or_str(v, cfg->max_output_lines);
-
-    v = cJSON_GetObjectItemCaseSensitive(root, "max_output_bytes");
-    cfg->max_output_bytes = num_or_str(v, cfg->max_output_bytes);
-
+    if (!root) {
+        fprintf(stderr, "jb: config: %s: invalid JSON\n", path);
+        return -1;
+    }
+    if (apply_json(cfg, root, path) != 0) { cJSON_Delete(root); return -1; }
     cJSON_Delete(root);
 
     /* Save resolved config path for child inheritance */
@@ -161,7 +179,7 @@ int config_load(jb_config *cfg, const char *config_path)
         strncpy(g_resolved_path, path, sizeof(g_resolved_path) - 1);
     }
 
-    /* Phase 6: the repo's local .jb/config.json merges over the global
+    /* The repo's local .jb/config.json merges over the global
        (git config --local analog) — the effective view is the merged one. */
     char cwd[4096];
     if (getcwd(cwd, sizeof(cwd))) {
@@ -169,7 +187,15 @@ int config_load(jb_config *cfg, const char *config_path)
         if (jb_find_repo(cwd, repo_root, sizeof(repo_root)) == 0) {
             char local[4096];
             snprintf(local, sizeof(local), "%s/.jb/config.json", repo_root);
-            overlay_file(cfg, local);
+            char *j2 = read_file(local);
+            if (j2) {
+                cJSON *r2 = cJSON_Parse(j2);
+                free(j2);
+                if (r2) {
+                    if (apply_json(cfg, r2, local) != 0) { cJSON_Delete(r2); return -1; }
+                    cJSON_Delete(r2);
+                }
+            }
         }
     }
 

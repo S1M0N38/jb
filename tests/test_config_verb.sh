@@ -161,12 +161,13 @@ else
 fi
 
 # ---- -c KEY=VALUE override on run (never persisted) ----
-_out=$(prompt_pong | "$JB" -c max_tokens=77777 run 2>/dev/null)
+_unique_model="override-test-model"
+_out=$(prompt_pong | "$JB" -c model="$_unique_model" run 2>/dev/null)
 _rc=$?
 _latest=$(newest_session)
 if [ -n "$_latest" ] && [ -f "$_latest/metadata.json" ]; then
-    _mt=$(jq -r '.config.max_tokens // empty' "$_latest/metadata.json" 2>/dev/null)
-    if [ "$_mt" = "77777" ]; then
+    _mt=$(jq -r '.config.model // empty' "$_latest/metadata.json" 2>/dev/null)
+    if [ "$_mt" = "$_unique_model" ]; then
         pass "jb -c overrides the run config (metadata snapshot)"
     else
         fail "jb -c overrides the run config (metadata snapshot)" "got: $_mt"
@@ -174,7 +175,7 @@ if [ -n "$_latest" ] && [ -f "$_latest/metadata.json" ]; then
 else
     fail "jb -c overrides the run config (metadata snapshot)" "no session dir found (exit $_rc)"
 fi
-if [ "$(jq -r '.config.max_tokens // empty' ".jb/config.json" 2>/dev/null)" = "" ]; then
+if [ "$(jq -r ".config.model // empty" ".jb/config.json" 2>/dev/null)" != "$_unique_model" ]; then
     pass "jb -c never persists into the local config"
 else
     fail "jb -c never persists into the local config"

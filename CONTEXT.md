@@ -35,7 +35,7 @@ _Avoid_: Plugin, extension, module, TUI (jb has none of these). GUI is deliberat
 - **session.jsonl** — the authoritative conversation: header line + one entry per message, each with unique 8-hex id, parentId chain, ISO-ms timestamp, role, content blocks, usage, stopReason. Append-only.
 - **events.jsonl** — the live stream: pi json-mode, delta-only. First line is the session header (same object as session.jsonl's).
 - **metadata.json** — the jb index (see Language above).
-- **Temp files** — bash output exceeding `max_output_bytes` saved to `$TMPDIR/jb-<uuid>-bash-<N>.out` (respects `$TMPDIR`, defaults to `/tmp`). Path included in tool result.
+- **Temp files** — bash output exceeding the fixed output limit (`JB_MAX_OUTPUT_BYTES`, 51200) is saved to `$TMPDIR/jb-<uuid>-bash-<N>.out` (respects `$TMPDIR`, defaults to `/tmp`). Path included in tool result.
 - **Exit codes**: 0 = success · 1 = error/not found/refused · 2 = usage. When the process is killed by a signal (SIGINT/SIGTERM), the OS reports death-by-signal — the shell sees 128+signal (130/143). jb catches the signal, closes the session, then re-raises with the default disposition so the parent sees a genuine signal death, not a faked exit code.
 - **Error retries**: network/429/5xx retried with backoff. Auth/400 errors exit immediately. Malformed tool arguments sent back to model as error for self-correction.
 - **Signal handling**: deferred pattern — the handler only sets a flag and kills the curl/tool child (async-signal-safe; no malloc/stdio/cJSON in a handler, ever). The main loop notices the flag at the next checkpoint and closes the session in normal context: assistant entry with `stopReason: "aborted"` + `errorMessage`, metadata status `error` (reference §6 enum — a killed session is a kind of failure; the nuance lives in the entry), partial answer on stdout. Then the default disposition is restored and the signal re-raised. SIGPIPE = die (default).
@@ -215,19 +215,16 @@ Git-style, two files, local merged over global; per-run `-c` overrides:
 
 - **Global**: `~/.config/jb/config.json` (or `$XDG_CONFIG_HOME/jb/config.json`)
 - **Local**: `.jb/config.json`
-- **Per-run**: `jb -c max_tokens=10000 run` (repeatable)
+- **Per-run**: `jb -c model=… run` (repeatable)
 
 ```json
 {
   "api_url": "https://opencode.ai/zen/go/v1",
-  "model": "mimo-v2.5",
-  "max_tokens": 500000,
-  "max_output_lines": 2000,
-  "max_output_bytes": 51200
+  "model": "mimo-v2.5"
 }
 ```
 
-`api_url` and `model` are required — **jb ships no default endpoint or model**; the remaining fields are optional (the limits above are the defaults). Any key is accepted and stored as a string, coerced at use. Bootstrap with `jb config --global api_url …` and `jb config --global model …`. The effective configuration is snapshotted into each session's `metadata.json` at run time — the replication record.
+**The config is minimal: exactly these two keys, both required** — jb ships no default endpoint or model (bootstrap with `jb config --global api_url …` / `jb config --global model …`). No other keys are supported: unknown keys (legacy ones like `max_tokens`, `token_budget`, `temperature` included) warn and are ignored. Every limit — the turn ceiling (50), the token budget (500k), tool output truncation — is a fixed constant. The effective configuration is snapshotted into each session's `metadata.json` at run time — the replication record.
 
 ## Documentation
 

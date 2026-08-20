@@ -49,10 +49,7 @@ _unique_model="test-config-flag-model"
 cat > "$_tmpcfg2" <<EOF
 {
   "api_url": "https://api.example.com/v1",
-  "model": "$_unique_model",
-  "max_tokens": 12345,
-  "max_output_lines": 100,
-  "max_output_bytes": 9999
+  "model": "$_unique_model"
 }
 EOF
 _out=$(echo "say OK" | "$JB" run --config "$_tmpcfg2" 2>/dev/null)
@@ -65,11 +62,11 @@ if [ -n "$_latest" ] && [ -f "$_latest/metadata.json" ]; then
     else
         fail "--config loads specified config file (model matches)" "expected $_unique_model, got $_meta_model"
     fi
-    _meta_tokens=$(jq -r '.config.max_tokens // empty' "$_latest/metadata.json" 2>/dev/null)
-    if [ "$_meta_tokens" = "12345" ]; then
-        pass "--config loads specified config file (max_tokens matches)"
+    _meta_url=$(jq -r '.config.api_url // empty' "$_latest/metadata.json" 2>/dev/null)
+    if [ "$_meta_url" = "https://api.example.com/v1" ]; then
+        pass "--config loads specified config file (api_url matches)"
     else
-        fail "--config loads specified config file (max_tokens matches)" "expected 12345, got $_meta_tokens"
+        fail "--config loads specified config file (api_url matches)" "expected https://api.example.com/v1, got $_meta_url"
     fi
 else
     fail "--config loads specified config file" "no session metadata found"
@@ -81,8 +78,7 @@ mkdir -p "$_rel_dir"
 cat > "$_rel_dir/rel-config.json" <<EOF
 {
   "api_url": "https://api.example.com/v1",
-  "model": "relative-path-test",
-  "max_tokens": 99999
+  "model": "relative-path-test"
 }
 EOF
 (
@@ -102,24 +98,12 @@ else
 fi
 
 # Child jb process inherits --config from parent
-# Derive the child config from the scratch copy of the real config
-# (provider-agnostic), overriding max_tokens
+# Real API: the parent (real config) prompts the model to spawn a child via
+# the jb tool; the child inherits the parent's config path, so its snapshot
+# must carry the same api_url/model as the parent's config file.
 _child_cfg="$SCRATCH/cfg-child.json"
-_unique_max_tokens="77777"
-jq --arg t "$_unique_max_tokens" '.max_tokens = ($t|tonumber)' "$SCRATCH/.config/jb/config.json" > "$_child_cfg" 2>/dev/null
-# Fallback if no real config was copied: a minimal provider-neutral config
-# (will fail API, but child inheritance is still verifiable via metadata)
-if [ ! -s "$_child_cfg" ]; then
-    cat > "$_child_cfg" <<'TESTCFG'
-{
-  "api_url": "https://api.example.com/v1",
-  "model": "test-model",
-  "max_tokens": 77777,
-  "max_output_lines": 2000,
-  "max_output_bytes": 51200
-}
-TESTCFG
-fi
+cp "$SCRATCH/.config/jb/config.json" "$_child_cfg" 2>/dev/null || \
+    printf '{"api_url":"https://api.example.com/v1","model":"test-model"}\n' > "$_child_cfg"
 
 # Run parent that spawns a child via jb tool; both sessions land in this repo
 _out=$(echo "Use the jb tool with prompt 'say exactly: OK'. Reply with just what the child returns." | "$JB" run --config "$_child_cfg" 2>/dev/null)
@@ -131,17 +115,20 @@ else
 fi
 
 # Find the child session (has author field in metadata — the parent's uuid)
+_expected_url=$(sed -n 's/.*"api_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$_child_cfg" | head -1)
+_expected_model=$(sed -n 's/.*"model"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$_child_cfg" | head -1)
 _found_child=0
 for _d in "$JB_SESSIONS_DIR"/*/; do
     [ -f "${_d}metadata.json" ] || continue
     _has_author=$(jq -r '.author // empty' "${_d}metadata.json" 2>/dev/null)
     if [ -n "$_has_author" ]; then
-        _c_tokens=$(jq -r '.config.max_tokens // empty' "${_d}metadata.json" 2>/dev/null)
-        if [ "$_c_tokens" = "$_unique_max_tokens" ]; then
+        _c_url=$(jq -r '.config.api_url // empty' "${_d}metadata.json" 2>/dev/null)
+        _c_model=$(jq -r '.config.model // empty' "${_d}metadata.json" 2>/dev/null)
+        if [ "$_c_url" = "$_expected_url" ] && [ "$_c_model" = "$_expected_model" ]; then
             pass "child jb inherits --config: child uses parent config"
             _found_child=1
         else
-            fail "child jb inherits --config: child uses parent config" "expected max_tokens=$_unique_max_tokens, got $_c_tokens"
+            fail "child jb inherits --config: child uses parent config" "expected url=$_expected_url model=$_expected_model, got url=$_c_url model=$_c_model"
         fi
         break
     fi
