@@ -32,7 +32,7 @@ done
 
 # Man page .TH line has version
 case "$(cat "$REPO_ROOT/jb.1")" in
-    *"jb 0.1"*) pass "man page .TH includes version" ;;
+    *"jb 0.2"*) pass "man page .TH includes version" ;;
     *) fail "man page .TH includes version" ;;
 esac
 

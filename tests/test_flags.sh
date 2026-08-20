@@ -1,7 +1,7 @@
 # test_flags.sh — --version, --help, bare jb, unknown flags
 
 # --version prints version string and exits 0
-assert_stdout_contains "jb --version prints version" "jb 0.1" "$JB" --version
+assert_stdout_contains "jb --version prints version" "jb 0.2" "$JB" --version
 assert_exit 0 "jb --version exits 0" "$JB" --version
 
 # --help prints the command reference and exits 0
