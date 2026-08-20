@@ -1,11 +1,20 @@
 #!/bin/sh
 # gen-assets.sh — generate src/assets.inc from src/vendor/pi-export/ (pinned).
 # Build-time step (Makefile), not a runtime dependency. Each vendored file
-# becomes a static const array + length via xxd -i. Source version pin:
-# pi 0.84.1 (MIT) — see src/vendor/pi-export/README.md.
+# becomes a static const array + length. POSIX-only: uses od (no xxd).
 set -eu
 SRC="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 OUT="$SRC/../../assets.inc"
+
+# to_c <sym> <file> — emit one static const array + length.
+to_c() {
+    sym="$1"
+    file="$2"
+    size=$(wc -c < "$file")
+    printf 'static const unsigned char %s[] = {\n' "$sym"
+    od -An -v -t x1 "$file" | awk '{ for (i = 1; i <= NF; i++) printf "0x%s, ", $i }'
+    printf '\n};\nstatic const unsigned int %s_len = %d;\n' "$sym" "$size"
+}
 
 {
     echo "/* assets.inc — vendored pi viewer assets (pi 0.84.1, MIT, pinned)."
@@ -14,8 +23,6 @@ OUT="$SRC/../../assets.inc"
     for f in template.html template.css template.js theme-vars.css \
              vendor/marked.min.js vendor/highlight.min.js; do
         sym="jb_asset_$(printf '%s' "$f" | tr '/.-' '___')"
-        xxd -i "$SRC/$f" | sed \
-            -e "s/^unsigned char .*\[\]/static const unsigned char ${sym}[]/" \
-            -e "s/^unsigned int .*_len/static const unsigned int ${sym}_len/"
+        to_c "$sym" "$SRC/$f"
     done
 } > "$OUT"

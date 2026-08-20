@@ -1,10 +1,20 @@
 #!/bin/sh
 # gen-assets.sh — generate src/ui_assets.inc from ui/ (jb ui's source of
 # truth). Build-time step (Makefile), not a runtime dependency. Each ui/
-# file becomes a static const array + length via xxd -i.
+# file becomes a static const array + length. POSIX-only: uses od (no xxd).
 set -eu
 SRC="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 OUT="$SRC/../src/ui_assets.inc"
+
+# to_c <sym> <file> — emit one static const array + length.
+to_c() {
+    sym="$1"
+    file="$2"
+    size=$(wc -c < "$file")
+    printf 'static const unsigned char %s[] = {\n' "$sym"
+    od -An -v -t x1 "$file" | awk '{ for (i = 1; i <= NF; i++) printf "0x%s, ", $i }'
+    printf '\n};\nstatic const unsigned int %s_len = %d;\n' "$sym" "$size"
+}
 
 {
     echo "/* ui_assets.inc — embedded jb ui assets (ui/index.html, style.css, app.js)."
@@ -12,8 +22,6 @@ OUT="$SRC/../src/ui_assets.inc"
     echo "   the source of truth; rebuild with: make src/ui_assets.inc */"
     for f in index.html style.css app.js; do
         sym="jb_ui_$(printf '%s' "$f" | tr '.-' '__')"
-        xxd -i "$SRC/$f" | sed \
-            -e "s/^unsigned char .*\[\]/static const unsigned char ${sym}[]/" \
-            -e "s/^unsigned int .*_len/static const unsigned int ${sym}_len/"
+        to_c "$sym" "$SRC/$f"
     done
 } > "$OUT"
